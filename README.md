@@ -68,6 +68,12 @@ Features:
 (optional) Bank switching hardware for the ROMs
 (optional) Logic to generate interrupts
 
+# Pins
+Aha moment:
+A series of pins are just a way for 2 devices to connect and communicate with each other.
+[PPU Pinout](https://www.nesdev.org/wiki/PPU_pinout)
+[Cartridge connector](https://www.nesdev.org/wiki/Cartridge_connector)
+
 # Registers
 
 ## CPU Registers
