@@ -1,12 +1,13 @@
 use crate::reader::{Reader, ReaderError, LE};
 use std::array::TryFromSliceError;
 
-const NES_MAGIC: &[u8] = b"NES";
+const NES_MAGIC: &[u8] = b"NES\x1a";
 
 /// Represents the file format used by NES emulators. We are using this format in order to test our
 /// own NES Emulator implementation, because majority of the tests are in this format.
 /// This represents the iNES file format. We dropped the `i` for better naming
 // TODO: We might want to switch the memory/address size below to u16
+#[derive(Debug)]
 pub struct INes {
     // Size of PRG ROM, which is the ROM connected to the CPU. The size itself is stored as a count
     // of 16KiB units. But here we will store it directly in bytes after reading it such that it is
@@ -17,6 +18,16 @@ pub struct INes {
     // from the file such that it is easier to manipulate.
     // Value `0` means the board uses CHR RAM
     chr_rom_size: usize,
+    // TODO: Flags 6
+    flags6: u8,
+    // TODO: Flags 7
+    flags7: u8,
+    // TODO: Flags 8
+    flags8: u8,
+    // TODO: Flags 9
+    flags9: u8,
+    // TODO: Flags 10
+    flags10: u8,
 }
 
 // Represents a Kilobyte unit in bytes size
@@ -38,9 +49,28 @@ impl INes {
         let chr_rom_block_count = reader.read::<u8, LE>()? as usize;
         let chr_rom_size = chr_rom_block_count * 8 * KB;
 
+        // Read the flags
+        let flags6 = reader.read::<u8, LE>()?;
+        // Read the flags
+        let flags7 = reader.read::<u8, LE>()?;
+        // Read the flags
+        let flags8 = reader.read::<u8, LE>()?;
+        // Read the flags
+        let flags9 = reader.read::<u8, LE>()?;
+        // Read the flags
+        let flags10 = reader.read::<u8, LE>()?;
+
+        // Read the remaining padding
+        let _padding = reader.read_bytes(5)?;
+
         Ok(Self{
             prg_rom_size,
             chr_rom_size,
+            flags6,
+            flags7,
+            flags8,
+            flags9,
+            flags10,
         })
     }
 }
