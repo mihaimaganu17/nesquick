@@ -28,6 +28,12 @@ pub struct Flags6 {
     mapper_low_4bits: u8,
 }
 
+impl Flags6 {
+    pub fn trainer(&self) -> bool {
+        self.trainer
+    }
+}
+
 impl From<u8> for Flags6 {
     fn from(flags: u8) -> Self {
         // Extract the needed information from the flags

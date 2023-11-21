@@ -33,6 +33,11 @@ impl Reader {
 
         Ok(primitive)
     }
+
+    /// Return number of bytes left to read
+    pub fn bytes_left(&self) -> usize {
+        self.data.len() - self.pos
+    }
 }
 
 // Type of endian we can parse

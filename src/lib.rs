@@ -1,5 +1,6 @@
 mod reader;
 mod nes;
+mod emulator;
 
 #[cfg(test)]
 mod test {
@@ -17,6 +18,12 @@ mod test {
         let data = std::fs::read(path).expect("Failed to read file from disk");
         let mut reader = Reader::new(data);
         let ines = INes::parse(&mut reader).expect("Failed to parse INes");
-        println!("{ines:#?}");
+
+        // Check that we read all bytes from the file
+        assert!(0 == reader.bytes_left());
+        assert!(ines.trainer().is_none());
+
+        println!("INes {:#?}", ines.header());
+        //println!("PRG rom {:#?}", ines.prg_rom().get(0..50));
     }
 }
