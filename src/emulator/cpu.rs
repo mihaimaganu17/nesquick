@@ -36,7 +36,68 @@ pub struct Cpu {
     // $0100 - $01FF
     s: u8,
     // Status register, used by the ALU, but is byte-wide.
-    p: u8,
+    p: StatusRegister,
+}
+
+#[derive(Debug)]
+pub struct StatusRegister {
+    // Bit 0
+    pub carry: bool,
+    // Bit 1
+    // After most instructions that have a value result, this flag will either
+    // be set of cleared based on whether or not that value is equal to zero.
+    pub zero: bool,
+    // Bit 2
+    // Interrupt disable
+    pub int_disable: bool,
+    // Bit 3
+    // On the NES, decimal mode is disable and so this flag has no effect.
+    pub decimal: bool,
+    // Bit 4, the B flag
+    pub b_flag: bool,
+    // Bit 5, always 1
+    pub always_1: bool,
+    // Bit 6, Overflow
+    pub overflow: bool,
+    // Bit 7, Negative
+    pub negative: bool,
+}
+
+impl From<u8> for StatusRegister {
+    fn from(value: u8) -> Self {
+        Self {
+            carry: Self::u8_to_bool(value & 1),
+            zero: Self::u8_to_bool(value >> 1 & 1),
+            int_disable: Self::u8_to_bool(value >> 2 & 1),
+            decimal: Self::u8_to_bool(value >> 3 & 1),
+            b_flag: Self::u8_to_bool(value >> 4 & 1),
+            always_1: Self::u8_to_bool(value >> 5 & 1),
+            overflow: Self::u8_to_bool(value >> 6 & 1),
+            negative: Self::u8_to_bool(value >> 7 & 1),
+        }
+    }
+}
+
+impl StatusRegister {
+    // Convert any u8 into a boolean
+    fn u8_to_bool(value: u8) -> bool {
+        if value != 0 { true } else { false }
+    }
+    fn bool_to_u8(value: bool) -> u8 {
+        if value == true { 1 } else { 0 }
+    }
+
+    /// Return the register as an u8
+    pub fn as_u8(&self) -> u8 {
+        Self::bool_to_u8(self.carry) |
+            Self::bool_to_u8(self.zero) << 1 |
+            Self::bool_to_u8(self.int_disable) << 2 |
+            Self::bool_to_u8(self.decimal) << 3 |
+            Self::bool_to_u8(self.b_flag) << 4 |
+            Self::bool_to_u8(self.always_1) << 5 |
+            Self::bool_to_u8(self.overflow) << 6 |
+            Self::bool_to_u8(self.negative) << 7
+    }
 }
 
 impl Cpu {
@@ -45,7 +106,7 @@ impl Cpu {
     // design, RP2A03G CPU chi, NES-CPU-07 main board revision.
     pub fn power_up() -> Cpu {
         Self {
-            p: 0x34,
+            p: 0x34.into(),
             acc: 0,
             x: 0,
             y: 0,
@@ -65,20 +126,53 @@ impl Cpu {
     // implement that trait
     pub fn execute(&mut self, memory: &mut CpuMmu) -> Result<(), CpuError> {
         // Go until death
-        while let Some(byte) = memory.read_u8(self.pc as usize) {
-            self.pc += std::mem::size_of::<u8>() as u16;
-            //panic!("Read a byte {:x}", byte);
+        while let Ok(inst) = Instruction::from_pc(&mut self.pc, memory) {
+            println!("Pc: {:?} -> Inst {inst:?}", self.pc);
         }
         Ok(())
     }
 }
+
+/// Represents a NES 6502 Instruction
+#[derive(Debug)]
+pub enum Instruction {
+    Sed(Sed),
+}
+
+#[derive(Debug)]
+pub enum InstructionError {
+    OverflowPc,
+}
+
+impl Instruction {
+    /// Reads and decodes a single instruction located at `pc` in the given `mmu`
+    pub fn from_pc(
+        pc: &mut u16,
+        mmu: &mut CpuMmu
+    ) -> Result<Self, InstructionError> {
+        *pc = pc
+            .checked_add(std::mem::size_of::<u8>() as u16)
+            .ok_or(InstructionError::OverflowPc)?;
+        Ok(Self::Sed(Sed))
+    }
+}
+
+#[derive(Debug)]
+pub struct Sed;
 
 /// When the CPU fetches an opcode, besides decoding the assembly instruction,
 /// it will also decode and addressing mode that will determine the number
 /// of bytes needed for operands. There are 13 such addresing modes.
 #[derive(Debug)]
 pub enum AddrMode {
+    // For many 6502 instructions the source and destination of the information
+    // to be manipulated is implied directly by the function of the instruction
+    // itself and no further operand needs to be specified. Operations like
+    // 'Clear Carry Flag' (CLC) and 'Return from Subroutine' (RTS) are
+    // implicit.
+    Implied,
 }
 
 #[derive(Debug)]
-pub enum CpuError {}
+pub enum CpuError {
+}
