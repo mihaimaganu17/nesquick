@@ -38,8 +38,6 @@ impl Emulator {
         // Execute instructions
         self.cpu.execute(&mut self.cpu_mmu)?;
 
-        println!("{entrypoint:x?}");
-
         Ok(())
     }
 }

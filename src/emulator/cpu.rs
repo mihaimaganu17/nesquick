@@ -1,4 +1,5 @@
 //! Module representing a NES 6502 CPU(without a decimal mode)
+mod opcode;
 
 use crate::emulator::CpuMmu;
 
@@ -7,7 +8,7 @@ use crate::emulator::CpuMmu;
 /// 0x0000 to 0xFFFF.
 // The CPU memory is actualy stored in the `Emulator` structure from
 // src/emulator.rs
-/// Every execution cycle, the CPU will fetsch an 8-bit operation code from
+/// Every execution cycle, the CPU will fetch an 8-bit operation code from
 /// this memory space. Many of these assembly instructions require an operand
 /// to work with, and this operand is indicated by the 1 or 2 bytes immediately
 /// following the opcode in memory. Some instruction however do no require any
@@ -135,13 +136,77 @@ impl Cpu {
 
 /// Represents a NES 6502 Instruction
 #[derive(Debug)]
-pub enum Instruction {
+pub struct Instruction {
+    opcode: Opcode,
+    addr_mode: AddrMode,
+    cycles: u8,
+}
+
+#[derive(Debug)]
+pub enum Opcode {
     Sed(Sed),
+    Sei(Sei),
+    Cld(Cld),
+    // LDX Immediate,
+    LdxI(Ldx),
+    // LDX Zero Page,
+    LdxZp(Ldx),
+    // LDX Zero Page, Y
+    LdxZpY(Ldx),
+    // LDX Absolute
+    LdxA(Ldx),
+    // Ldx Absolute, Y
+    LdxAY(Ldx),
+    // LDY Immediate,
+    LdyI(Ldy),
+    // LDY Zero Page,
+    LdyZp(Ldy),
+    // LDY Zero Page, X
+    LdyZpX(Ldy),
+    // LDY Absolute
+    LdyA(Ldy),
+    // LdY Absolute, X
+    LdyAX(Ldy),
+    // Transfer X to Stack Pointer
+    Txs(Txs),
+    // LDA Immediate,
+    LdaI(Lda),
+    // LDA Zero Page,
+    LdaZp(Lda),
+    // LDA Zero Page, X
+    LdaZpX(Lda),
+    // LDA Absolute
+    LdaA(Lda),
+    // LDA Absolute, X
+    LdaAX(Lda),
+    // LDA Absolute, Y
+    LdaAY(Lda),
+    // LDA Indirect, X
+    LdaIX(Lda),
+    // LDA Indirect, Y
+    LdaIY(Lda),
+    // LDA Zero Page,
+    StaZp(Sta),
+    // STA Zero Page, X
+    StaZpX(Sta),
+    // STA Absolute
+    StaA(Sta),
+    // STA Absolute, X
+    StaAX(Sta),
+    // STA Absolute, Y
+    StaAY(Sta),
+    // STA Indirect, X
+    StaIX(Sta),
+    // STA Indirect, Y
+    StaIY(Sta),
 }
 
 #[derive(Debug)]
 pub enum InstructionError {
     OverflowPc,
+    FailedToAccessPc(u16),
+    InvalidOpcode(u8),
+    InvalidInstruction(u8),
 }
 
 impl Instruction {
@@ -150,15 +215,133 @@ impl Instruction {
         pc: &mut u16,
         mmu: &mut CpuMmu
     ) -> Result<Self, InstructionError> {
+        // Read the byte at the program counter
+        let Some(byte) = mmu.read_u8(usize::from(*pc)) else {
+            return Err(InstructionError::FailedToAccessPc(*pc))
+        };
+
+        println!("Byte {byte:x}");
+
+        // Advance the program counter
         *pc = pc
             .checked_add(std::mem::size_of::<u8>() as u16)
             .ok_or(InstructionError::OverflowPc)?;
-        Ok(Self::Sed(Sed))
+
+        let inst = match byte {
+            opcode::SED => {
+                Instruction {
+                    opcode: Opcode::Sed(Sed),
+                    addr_mode: AddrMode::Implied,
+                    cycles: 2,
+                }
+            }
+            opcode::SEI => {
+                Instruction {
+                    opcode: Opcode::Sei(Sei),
+                    addr_mode: AddrMode::Implied,
+                    cycles: 2,
+                }
+            }
+            opcode::CLD => {
+                Instruction {
+                    opcode: Opcode::Cld(Cld),
+                    addr_mode: AddrMode::Implied,
+                    cycles: 2,
+                }
+            }
+            opcode::LDX_I => {
+                // We also have to read the next byte, which is our operand
+                let Some(next_byte) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::LdxI(Ldx),
+                    addr_mode: AddrMode::Immediate(next_byte),
+                    cycles: 2,
+                }
+            }
+            opcode::LDY_I => {
+                // We also have to read the next byte, which is our operand
+                let Some(next_byte) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::LdyI(Ldy),
+                    addr_mode: AddrMode::Immediate(next_byte),
+                    cycles: 2,
+                }
+            }
+            opcode::TXS => {
+                Instruction {
+                    opcode: Opcode::Txs(Txs),
+                    addr_mode: AddrMode::Implied,
+                    cycles: 2,
+                }
+            }
+            opcode::LDA_I => {
+                // We also have to read the next byte, which is our operand
+                let Some(next_byte) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::LdaI(Lda),
+                    addr_mode: AddrMode::Immediate(next_byte),
+                    cycles: 2,
+                }
+            }
+            opcode::STA_A => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::StaA(Sta),
+                    addr_mode: AddrMode::Absolute(addr),
+                    cycles: 4,
+                }
+            }
+            _ => return Err(InstructionError::InvalidOpcode(byte)),
+        };
+        Ok(inst)
     }
 }
 
 #[derive(Debug)]
 pub struct Sed;
+#[derive(Debug)]
+pub struct Sei;
+#[derive(Debug)]
+pub struct Cld;
+#[derive(Debug)]
+pub struct Ldx;
+#[derive(Debug)]
+pub struct Ldy;
+#[derive(Debug)]
+pub struct Txs;
+#[derive(Debug)]
+pub struct Lda;
+#[derive(Debug)]
+pub struct Sta;
 
 /// When the CPU fetches an opcode, besides decoding the assembly instruction,
 /// it will also decode and addressing mode that will determine the number
@@ -171,6 +354,15 @@ pub enum AddrMode {
     // 'Clear Carry Flag' (CLC) and 'Return from Subroutine' (RTS) are
     // implicit.
     Implied,
+    // Immediate addressing allows the programmer to directly specify an 8 bit
+    // constant within the instruction. It is indicated by a '#' symbol
+    // followed by an numeric expression.
+    // When decoding, the immediate numerical byte is followed directly after
+    // the instruction byte
+    Immediate(u8),
+    // Instructions using absolute addressing contain a full 16 bit address to
+    // identify the target location.
+    Absolute(u16),
 }
 
 #[derive(Debug)]
