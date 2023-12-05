@@ -41,6 +41,12 @@ pub struct Cpu {
 }
 
 #[derive(Debug)]
+pub enum Idx {
+    X,
+    Y,
+}
+
+#[derive(Debug)]
 pub struct StatusRegister {
     // Bit 0
     pub carry: bool,
@@ -199,6 +205,16 @@ pub enum Opcode {
     StaIX(Sta),
     // STA Indirect, Y
     StaIY(Sta),
+    // STX Zero Page
+    StxZp(Stx),
+    // STX Zero Page, Y
+    StxZpY(Stx),
+    // STX Absolute
+    StxA(Stx),
+    // DEY - Decrement Y Register
+    Dey(Dey),
+    // BNE - Branch if Not Equal
+    Bne(Bne),
 }
 
 #[derive(Debug)]
@@ -320,6 +336,80 @@ impl Instruction {
                     cycles: 4,
                 }
             }
+            opcode::STA_ZP => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::StaZp(Sta),
+                    addr_mode: AddrMode::ZeroPage(addr),
+                    cycles: 3,
+                }
+            }
+            opcode::STX_ZP => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::StxZp(Stx),
+                    addr_mode: AddrMode::ZeroPage(addr),
+                    cycles: 3,
+                }
+            }
+            opcode::DEY=> {
+                Instruction {
+                    opcode: Opcode::Dey(Dey),
+                    addr_mode: AddrMode::Implied,
+                    cycles: 2,
+                }
+            }
+            opcode::STA_I_Y => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::StaIY(Sta),
+                    addr_mode: AddrMode::IndirectIndexed(Idx::Y, addr),
+                    cycles: 6,
+                }
+            }
+            opcode::BNE => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Convert the unsigned to signe integer, because the relative
+                // offset can also be negative
+                let addr = utils::u8_to_i8(addr);
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Bne(Bne),
+                    addr_mode: AddrMode::Relative(addr),
+                    cycles: 2,
+                }
+            }
             _ => return Err(InstructionError::InvalidOpcode(byte)),
         };
         Ok(inst)
@@ -342,6 +432,12 @@ pub struct Txs;
 pub struct Lda;
 #[derive(Debug)]
 pub struct Sta;
+#[derive(Debug)]
+pub struct Stx;
+#[derive(Debug)]
+pub struct Dey;
+#[derive(Debug)]
+pub struct Bne;
 
 /// When the CPU fetches an opcode, besides decoding the assembly instruction,
 /// it will also decode and addressing mode that will determine the number
@@ -363,8 +459,42 @@ pub enum AddrMode {
     // Instructions using absolute addressing contain a full 16 bit address to
     // identify the target location.
     Absolute(u16),
+    // An instruction using zero page addressing mode has only an 8 bit address
+    // operand. This limits it to addressing only the first 256 bytes of memory
+    // (e.g. $0000 to $00FF) where the most significant byte of the address is
+    // always zero. In zero page mode only the least significant byte of the
+    // address is held in the instruction making it shorter by one byte
+    // (important for space saving) and one less memory fetch during execution
+    // (important for speed).
+    //
+    // An assembler will automatically select zero page addressing mode if the
+    // operand evaluates to a zero page address and the instruction supports
+    // the mode (not all do).
+    // Zero page is wrapping aroung 256. Ex: (223 + 130) MOD 256 = 97;
+    ZeroPage(u8),
+    // Indirect Indexed
+    // Indirect indexed addressing is the most common indirection mode used
+    // on the 6502. In instruction contains the zero page location of the least
+    // significant byte of 16 bit address. The Y register is dynamically added
+    // to this value to generated the actual target address for operation.
+    IndirectIndexed(Idx, u8),
+    // Relative
+    // Relative addressing mode is used by branch instructions
+    // (e.g. BEQ, BNE, etc.) which contain a signed 8 bit relative offset
+    // (e.g. -128 to +127) which is added to program counter if the condition
+    // is true. As the program counter itself is incremented during instruction
+    // execution by two the effective address range for the target instruction
+    // must be with -126 to +129 bytes of the branch.
+    Relative(i8),
 }
 
 #[derive(Debug)]
 pub enum CpuError {
+}
+
+mod utils {
+    /// Converts a i8 to a u8 without data loss through pointer transmuting
+    pub fn u8_to_i8(value: u8) -> i8 {
+        unsafe { std::mem::transmute::<u8, i8>(value) }
+    }
 }
