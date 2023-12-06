@@ -13,7 +13,7 @@ pub struct Emulator {
 impl Emulator {
     pub fn new() -> Self {
         Emulator {
-            cpu_mmu: CpuMmu::with_size(2_usize.pow(16)),
+            cpu_mmu: CpuMmu::default(),
             cpu: Cpu::power_up(),
         }
     }

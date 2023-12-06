@@ -43,3 +43,24 @@ pub const DEY: u8 = 0x88;
 /// If the zero flag is clear then add the relative displacement to the program
 /// counter to cause a branch to a new location.
 pub const BNE: u8 = 0xD0;
+/// BPL - Branch if Positive
+///
+/// If the negative flag is clear then add the relative displacement to the program counter to
+/// cause a branch to a new location.
+pub const BPL: u8 = 0x10;
+/// BIT - Bit Test
+/// This instructions is used to test if one or more bits are set in a target
+/// memory location. The mask pattern in A is ANDed with the value in memory to
+/// set or clear the zero flag, but the result is not kept. Bits 7 and 6 of the
+/// value from memory are copied into the N and V flags.
+pub const BIT: u8 = 0x2c;
+/// JSR - Jump to Subroutine
+///
+/// The JSR instruction pushes the address (minus one) of the return point on
+/// to the stack and then sets the program counter to the target memory address.
+pub const JSR: u8 = 0x20;
+/// DEX - Decrement X Register
+/// Subtracts one from the X register setting the zero and negative flags as
+/// appropriate.
+pub const DEX: u8 = 0xCA;
+

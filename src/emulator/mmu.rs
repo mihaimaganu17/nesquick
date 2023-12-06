@@ -9,21 +9,29 @@ pub struct CpuMmu {
     size: usize,
     // Data
     data: Vec<u8>,
+    // We store the stack as a reference range to the current contentts of the
+    // memory.
+    stack: Range<usize>,
+}
+
+const DEFAULT_CPU_MMU_SIZE: usize = u16::MAX as usize + 1;
+
+impl Default for CpuMmu {
+    fn default() -> Self {
+        // Initialize the data
+        let mut data = Vec::with_capacity(DEFAULT_CPU_MMU_SIZE);
+        // Fill it with zeros
+        data.resize(DEFAULT_CPU_MMU_SIZE, 0);
+
+        CpuMmu {
+            size: DEFAULT_CPU_MMU_SIZE,
+            data,
+            stack: 0x0100..0x01FF,
+        }
+    }
 }
 
 impl CpuMmu {
-    pub fn with_size(size: usize) -> Self {
-        // Initialize the data
-        let mut data = Vec::with_capacity(size);
-        // Fill it with zeros
-        data.resize(size, 0);
-
-        CpuMmu {
-            size,
-            data,
-        }
-    }
-
     /// Sets the received `bytes` at the specified `offset` in the memory unit
     pub fn set_bytes(
         &mut self,

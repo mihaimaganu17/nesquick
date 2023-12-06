@@ -1,7 +1,7 @@
 //! Module representing a NES 6502 CPU(without a decimal mode)
 mod opcode;
 
-use crate::emulator::CpuMmu;
+use crate::emulator::{CpuMmu, CpuMmuError};
 
 /// Represents an 8-bit 6502 microprocessor. This CPU utilizes a 16-bit memory
 /// address space, meaning there are 2^16 bytes available for memory addresses,
@@ -134,7 +134,54 @@ impl Cpu {
     pub fn execute(&mut self, memory: &mut CpuMmu) -> Result<(), CpuError> {
         // Go until death
         while let Ok(inst) = Instruction::from_pc(&mut self.pc, memory) {
-            println!("Pc: {:?} -> Inst {inst:?}", self.pc);
+            println!("{inst:?}");
+            match inst.opcode() {
+                Opcode::Sei(_) => {
+                    // Set the interrupt disable flag to one.
+                    self.p.int_disable = true;
+                }
+                Opcode::Cld(_) => {
+                    // Clear decimal mode
+                    self.p.decimal = false;
+                }
+                Opcode::LdxI(_) => {
+                    // Load a byte of memory into the X register.
+                    let value = match inst.addr_mode() {
+                        AddrMode::Immediate(imm) => imm,
+                        _ => todo!(),
+                    };
+                    // Set X register to that value
+                    self.x = *value;
+                    // Set the flags accordingly
+                    self.p.zero = self.x == 0;
+                    if self.x >> 7 & 1 == 1 { self.p.negative = true; }
+                }
+                Opcode::Txs(_) => {
+                    self.s = self.x;
+                }
+                Opcode::Lda(_) => {
+                    // Load a byte of memory into the X register.
+                    let value = match inst.addr_mode() {
+                        AddrMode::Immediate(imm) => imm,
+                        _ => todo!(),
+                    };
+                    // Set X register to that value
+                    self.acc = *value;
+                    // Set the flags accordingly
+                    self.p.zero = self.acc == 0;
+                    if self.acc >> 7 & 1 == 1 { self.p.negative = true; }
+                }
+                Opcode::Sta(_) => {
+                    // Load a byte of memory into the X register.
+                    let addr = match inst.addr_mode() {
+                        AddrMode::Absolute(abs_addr) => abs_addr,
+                        _ => todo!(),
+                    };
+                    memory.set_bytes(usize::from(*addr), &[self.acc])?;
+                }
+                _ => {}
+            }
+            println!("Register status {self:#x?}");
         }
         Ok(())
     }
@@ -175,36 +222,10 @@ pub enum Opcode {
     LdyAX(Ldy),
     // Transfer X to Stack Pointer
     Txs(Txs),
-    // LDA Immediate,
-    LdaI(Lda),
-    // LDA Zero Page,
-    LdaZp(Lda),
-    // LDA Zero Page, X
-    LdaZpX(Lda),
-    // LDA Absolute
-    LdaA(Lda),
-    // LDA Absolute, X
-    LdaAX(Lda),
-    // LDA Absolute, Y
-    LdaAY(Lda),
-    // LDA Indirect, X
-    LdaIX(Lda),
-    // LDA Indirect, Y
-    LdaIY(Lda),
-    // LDA Zero Page,
-    StaZp(Sta),
-    // STA Zero Page, X
-    StaZpX(Sta),
-    // STA Absolute
-    StaA(Sta),
-    // STA Absolute, X
-    StaAX(Sta),
-    // STA Absolute, Y
-    StaAY(Sta),
-    // STA Indirect, X
-    StaIX(Sta),
-    // STA Indirect, Y
-    StaIY(Sta),
+    // Load Accumulator,
+    Lda(Lda),
+    // Store Accumulator,
+    Sta(Sta),
     // STX Zero Page
     StxZp(Stx),
     // STX Zero Page, Y
@@ -215,6 +236,14 @@ pub enum Opcode {
     Dey(Dey),
     // BNE - Branch if Not Equal
     Bne(Bne),
+    // BPL - Branch is positive
+    Bpl(Bpl),
+    // BIT - Bit test
+    Bit(Bit),
+    // JSR - Jump to subroutine
+    Jsr(Jsr),
+    // DEX - Decrement X Register
+    Dex(Dex),
 }
 
 #[derive(Debug)]
@@ -315,7 +344,7 @@ impl Instruction {
                     .ok_or(InstructionError::OverflowPc)?;
 
                 Instruction {
-                    opcode: Opcode::LdaI(Lda),
+                    opcode: Opcode::Lda(Lda),
                     addr_mode: AddrMode::Immediate(next_byte),
                     cycles: 2,
                 }
@@ -331,7 +360,7 @@ impl Instruction {
                     .ok_or(InstructionError::OverflowPc)?;
 
                 Instruction {
-                    opcode: Opcode::StaA(Sta),
+                    opcode: Opcode::Sta(Sta),
                     addr_mode: AddrMode::Absolute(addr),
                     cycles: 4,
                 }
@@ -347,7 +376,7 @@ impl Instruction {
                     .ok_or(InstructionError::OverflowPc)?;
 
                 Instruction {
-                    opcode: Opcode::StaZp(Sta),
+                    opcode: Opcode::Sta(Sta),
                     addr_mode: AddrMode::ZeroPage(addr),
                     cycles: 3,
                 }
@@ -386,7 +415,7 @@ impl Instruction {
                     .ok_or(InstructionError::OverflowPc)?;
 
                 Instruction {
-                    opcode: Opcode::StaIY(Sta),
+                    opcode: Opcode::Sta(Sta),
                     addr_mode: AddrMode::IndirectIndexed(Idx::Y, addr),
                     cycles: 6,
                 }
@@ -410,9 +439,74 @@ impl Instruction {
                     cycles: 2,
                 }
             }
+            opcode::BPL => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Convert the unsigned to signe integer, because the relative
+                // offset can also be negative
+                let addr = utils::u8_to_i8(addr);
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Bpl(Bpl),
+                    addr_mode: AddrMode::Relative(addr),
+                    cycles: 2,
+                }
+            }
+            opcode::BIT => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Bit(Bit),
+                    addr_mode: AddrMode::Absolute(addr),
+                    cycles: 4,
+                }
+            }
+            opcode::JSR => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Jsr(Jsr),
+                    addr_mode: AddrMode::Absolute(addr),
+                    cycles: 4,
+                }
+            }
+            opcode::DEX => {
+                Instruction {
+                    opcode: Opcode::Dex(Dex),
+                    addr_mode: AddrMode::Implied,
+                    cycles: 2,
+                }
+            }
             _ => return Err(InstructionError::InvalidOpcode(byte)),
         };
         Ok(inst)
+    }
+
+    pub fn opcode(&self) -> &Opcode {
+        &self.opcode
+    }
+    pub fn addr_mode(&self) -> &AddrMode {
+        &self.addr_mode
     }
 }
 
@@ -438,6 +532,14 @@ pub struct Stx;
 pub struct Dey;
 #[derive(Debug)]
 pub struct Bne;
+#[derive(Debug)]
+pub struct Bpl;
+#[derive(Debug)]
+pub struct Bit;
+#[derive(Debug)]
+pub struct Jsr;
+#[derive(Debug)]
+pub struct Dex;
 
 /// When the CPU fetches an opcode, besides decoding the assembly instruction,
 /// it will also decode and addressing mode that will determine the number
@@ -490,6 +592,13 @@ pub enum AddrMode {
 
 #[derive(Debug)]
 pub enum CpuError {
+    CpuMmuError(CpuMmuError),
+}
+
+impl From<CpuMmuError> for CpuError {
+    fn from(err: CpuMmuError) -> Self {
+        Self::CpuMmuError(err)
+    }
 }
 
 mod utils {
