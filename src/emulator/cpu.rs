@@ -144,7 +144,7 @@ impl Cpu {
                     // Clear decimal mode
                     self.p.decimal = false;
                 }
-                Opcode::LdxI(_) => {
+                Opcode::Ldx(_) => {
                     // Load a byte of memory into the X register.
                     let value = match inst.addr_mode() {
                         AddrMode::Immediate(imm) => imm,
@@ -171,15 +171,71 @@ impl Cpu {
                     self.p.zero = self.acc == 0;
                     if self.acc >> 7 & 1 == 1 { self.p.negative = true; }
                 }
-                Opcode::Sta(_) => {
+                Opcode::Ldy(_) => {
                     // Load a byte of memory into the X register.
-                    let addr = match inst.addr_mode() {
-                        AddrMode::Absolute(abs_addr) => abs_addr,
+                    let value = match inst.addr_mode() {
+                        AddrMode::Immediate(imm) => imm,
                         _ => todo!(),
                     };
-                    memory.set_bytes(usize::from(*addr), &[self.acc])?;
+                    // Set Y register to that value
+                    self.y = *value;
+                    // Set the flags accordingly
+                    self.p.zero = self.y == 0;
+                    if self.y >> 7 & 1 == 1 { self.p.negative = true; }
+
                 }
-                _ => {}
+                Opcode::Sta(_) => {
+                    // Load a byte of memory into the X register.
+                    let addr: u16 = match inst.addr_mode() {
+                        AddrMode::Absolute(abs_addr) => *abs_addr,
+                        AddrMode::ZeroPage(addr) => *addr as u16,
+                        AddrMode::IndirectIndexed(_, addr_lo) => {
+                            // Convert into a u16 address
+                            let read_addr_from = usize::from(*addr_lo as u16);
+                            // Read the least significant byte of the 16-bit
+                            // address
+                            let addr = memory.read_u16_le(read_addr_from)
+                                .ok_or(CpuError::MmuReadError(read_addr_from))?;
+                            let addr = self.y as u16 + addr;
+                            addr
+                        }
+                        _ => todo!(),
+                    };
+                    memory.set_bytes(usize::from(addr), &[self.acc])?;
+                }
+                Opcode::Stx(_) => {
+                    // Load a byte of memory into the X register.
+                    let addr: u16 = match inst.addr_mode() {
+                        AddrMode::Absolute(abs_addr) => *abs_addr,
+                        AddrMode::ZeroPage(addr) => *addr as u16,
+                        _ => todo!(),
+                    };
+                    memory.set_bytes(usize::from(addr), &[self.x])?;
+                }
+                Opcode::Dey(_) => {
+                    // Set Y register to that value
+                    self.y -= 1;
+                    // Set the flags accordingly
+                    self.p.zero = self.y == 0;
+                    if self.y >> 7 & 1 == 1 { self.p.negative = true; }
+                }
+                Opcode::Bne(_) => {
+                    if !self.p.zero {
+                        // For this instruction, typically there should be only
+                        // one addressing mode, so we will only use that one
+                        if let AddrMode::Relative(addr) = inst.addr_mode() {
+                            // Se the program counter. Given we know the
+                            // instruction was already read and decoded, we know
+                            // that the counter is already to the right base value.
+                            //
+                            // Since at the time of this writing, we do not know
+                            // how overflow works on the CPU, we just do a wrapping
+                            // operation
+                            self.pc = self.pc.wrapping_add_signed(*addr as i16);
+                        }
+                    }
+                }
+                _ => todo!()
             }
             println!("Register status {self:#x?}");
         }
@@ -200,38 +256,18 @@ pub enum Opcode {
     Sed(Sed),
     Sei(Sei),
     Cld(Cld),
-    // LDX Immediate,
-    LdxI(Ldx),
-    // LDX Zero Page,
-    LdxZp(Ldx),
-    // LDX Zero Page, Y
-    LdxZpY(Ldx),
-    // LDX Absolute
-    LdxA(Ldx),
-    // Ldx Absolute, Y
-    LdxAY(Ldx),
+    // LDX,
+    Ldx(Ldx),
     // LDY Immediate,
-    LdyI(Ldy),
-    // LDY Zero Page,
-    LdyZp(Ldy),
-    // LDY Zero Page, X
-    LdyZpX(Ldy),
-    // LDY Absolute
-    LdyA(Ldy),
-    // LdY Absolute, X
-    LdyAX(Ldy),
+    Ldy(Ldy),
     // Transfer X to Stack Pointer
     Txs(Txs),
     // Load Accumulator,
     Lda(Lda),
     // Store Accumulator,
     Sta(Sta),
-    // STX Zero Page
-    StxZp(Stx),
-    // STX Zero Page, Y
-    StxZpY(Stx),
-    // STX Absolute
-    StxA(Stx),
+    // STX Store X register,
+    Stx(Stx),
     // DEY - Decrement Y Register
     Dey(Dey),
     // BNE - Branch if Not Equal
@@ -305,7 +341,7 @@ impl Instruction {
                     .ok_or(InstructionError::OverflowPc)?;
 
                 Instruction {
-                    opcode: Opcode::LdxI(Ldx),
+                    opcode: Opcode::Ldx(Ldx),
                     addr_mode: AddrMode::Immediate(next_byte),
                     cycles: 2,
                 }
@@ -321,7 +357,7 @@ impl Instruction {
                     .ok_or(InstructionError::OverflowPc)?;
 
                 Instruction {
-                    opcode: Opcode::LdyI(Ldy),
+                    opcode: Opcode::Ldy(Ldy),
                     addr_mode: AddrMode::Immediate(next_byte),
                     cycles: 2,
                 }
@@ -392,7 +428,7 @@ impl Instruction {
                     .ok_or(InstructionError::OverflowPc)?;
 
                 Instruction {
-                    opcode: Opcode::StxZp(Stx),
+                    opcode: Opcode::Stx(Stx),
                     addr_mode: AddrMode::ZeroPage(addr),
                     cycles: 3,
                 }
@@ -593,6 +629,7 @@ pub enum AddrMode {
 #[derive(Debug)]
 pub enum CpuError {
     CpuMmuError(CpuMmuError),
+    MmuReadError(usize),
 }
 
 impl From<CpuMmuError> for CpuError {
