@@ -154,7 +154,7 @@ impl Cpu {
                     self.x = *value;
                     // Set the flags accordingly
                     self.p.zero = self.x == 0;
-                    if self.x >> 7 & 1 == 1 { self.p.negative = true; }
+                    self.p.negative = (self.x >> 7 & 1) == 1;
                 }
                 Opcode::Txs(_) => {
                     self.s = self.x;
@@ -169,7 +169,7 @@ impl Cpu {
                     self.acc = *value;
                     // Set the flags accordingly
                     self.p.zero = self.acc == 0;
-                    if self.acc >> 7 & 1 == 1 { self.p.negative = true; }
+                    self.p.negative = (self.acc >> 7 & 1) == 1;
                 }
                 Opcode::Ldy(_) => {
                     // Load a byte of memory into the X register.
@@ -181,7 +181,7 @@ impl Cpu {
                     self.y = *value;
                     // Set the flags accordingly
                     self.p.zero = self.y == 0;
-                    if self.y >> 7 & 1 == 1 { self.p.negative = true; }
+                    self.p.negative = (self.y >> 7 & 1) == 1;
 
                 }
                 Opcode::Sta(_) => {
@@ -194,9 +194,14 @@ impl Cpu {
                             let read_addr_from = usize::from(*addr_lo as u16);
                             // Read the least significant byte of the 16-bit
                             // address
-                            let addr = memory.read_u16_le(read_addr_from)
+                            let addr_lo = memory.read_u8(read_addr_from)
                                 .ok_or(CpuError::MmuReadError(read_addr_from))?;
-                            let addr = self.y as u16 + addr;
+                            let addr_lo = addr_lo.wrapping_add(self.y);
+                            // Read the most significant byte of the 16-bit
+                            // address
+                            let addr_hi = memory.read_u8(read_addr_from + 1)
+                                .ok_or(CpuError::MmuReadError(read_addr_from))?;
+                            let addr = addr_hi as u16 >> 4 | addr_lo as u16;
                             addr
                         }
                         _ => todo!(),
@@ -212,12 +217,19 @@ impl Cpu {
                     };
                     memory.set_bytes(usize::from(addr), &[self.x])?;
                 }
+                Opcode::Dex(_) => {
+                    // Set X register to that value
+                    self.x = self.x.wrapping_sub(1);
+                    // Set the flags accordingly
+                    self.p.zero = self.x == 0;
+                    self.p.negative = (self.x >> 7 & 1) == 1;
+                }
                 Opcode::Dey(_) => {
                     // Set Y register to that value
-                    self.y -= 1;
+                    self.y = self.y.wrapping_sub(1);
                     // Set the flags accordingly
                     self.p.zero = self.y == 0;
-                    if self.y >> 7 & 1 == 1 { self.p.negative = true; }
+                    self.p.negative = (self.y >> 7 & 1) == 1;
                 }
                 Opcode::Bne(_) => {
                     if !self.p.zero {
@@ -225,15 +237,49 @@ impl Cpu {
                         // one addressing mode, so we will only use that one
                         if let AddrMode::Relative(addr) = inst.addr_mode() {
                             // Se the program counter. Given we know the
-                            // instruction was already read and decoded, we know
-                            // that the counter is already to the right base value.
+                            // instruction was already read and decoded, we
+                            // know that the counter is already to the right
+                            // base value.
                             //
-                            // Since at the time of this writing, we do not know
-                            // how overflow works on the CPU, we just do a wrapping
-                            // operation
+                            // Since at the time of this writing, we do not
+                            // know how overflow works on the CPU, we just do
+                            // a wrapping operation
                             self.pc = self.pc.wrapping_add_signed(*addr as i16);
                         }
                     }
+                }
+                Opcode::Bpl(_) => {
+                    if !self.p.negative {
+                        // For this instruction, typically there should be only
+                        // one addressing mode, so we will only use that one
+                        if let AddrMode::Relative(addr) = inst.addr_mode() {
+                            // Se the program counter. Given we know the
+                            // instruction was already read and decoded, we
+                            // know that the counter is already to the right
+                            // base value.
+                            //
+                            // Since at the time of this writing, we do not
+                            // know how overflow works on the CPU, we just do
+                            // a wrapping operation
+                            self.pc = self.pc.wrapping_add_signed(*addr as i16);
+                        }
+                    }
+                }
+                Opcode::Bit(_) => {
+                    let value = match inst.addr_mode() {
+                        AddrMode::Absolute(addr) => {
+                            let to_read_from = usize::from(*addr);
+                            let value = memory.read_u8(to_read_from)
+                                .ok_or(CpuError::MmuReadError(to_read_from))?;
+                            value
+                        }
+                        _ => todo!(),
+                    };
+                    let tmp = value & self.acc;
+                    println!("value tmp {tmp}");
+                    self.p.zero = tmp == 0;
+                    self.p.negative = (tmp >> 7 & 1) != 0;
+                    self.p.overflow = (tmp >> 6 & 1) != 0;
                 }
                 _ => todo!()
             }
