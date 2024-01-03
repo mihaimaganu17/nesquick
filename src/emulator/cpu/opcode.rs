@@ -10,6 +10,8 @@ pub const CLD: u8 = 0xD8;
 /// Load a byte of memory into the X register setting the zero and negative
 /// flags as appropriate.
 pub const LDX_I: u8 = 0xA2;
+pub const LDX_ZP: u8 = 0xA6;
+pub const LDX_ZP_Y: u8 = 0xB6;
 /// TXS - Transfer X to Stack Pointer
 /// Copies the current contents of the X register into the stack register.
 pub const TXS: u8 = 0x9A;
@@ -63,4 +65,3 @@ pub const JSR: u8 = 0x20;
 /// Subtracts one from the X register setting the zero and negative flags as
 /// appropriate.
 pub const DEX: u8 = 0xCA;
-

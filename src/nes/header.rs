@@ -1,6 +1,6 @@
+use crate::nes::flags::{Flags6, Flags7};
 use crate::reader::{Reader, ReaderError, LE};
 use std::array::TryFromSliceError;
-use crate::nes::flags::{Flags6, Flags7};
 
 const NES_MAGIC: &[u8] = b"NES\x1a";
 
@@ -67,7 +67,7 @@ impl Header {
         // Read the remaining padding
         let _padding = reader.read_bytes(5)?;
 
-        Ok(Self{
+        Ok(Self {
             prg_rom_size,
             chr_rom_size,
             flags6,

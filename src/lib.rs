@@ -1,11 +1,11 @@
-mod reader;
-mod nes;
 mod emulator;
+mod nes;
+mod reader;
 
 #[cfg(test)]
 mod test {
-    use crate::reader::Reader;
     use crate::nes::INes;
+    use crate::reader::Reader;
 
     #[test]
     fn works() {
@@ -23,9 +23,9 @@ mod test {
         assert!(0 == reader.bytes_left());
         assert!(ines.trainer().is_none());
 
-        println!("INes {:#?}", ines.header());
-        //println!("PRG rom {:#?}", ines.prg_rom().get(0..50));
+        //println!("INes {:#?}", ines.header());
     }
+
     #[test]
     fn ppu_color_test() {
         let path = "testdata/color_test.nes";
@@ -37,7 +37,6 @@ mod test {
         assert!(0 == reader.bytes_left());
         assert!(ines.trainer().is_none());
 
-        println!("INes {:#?}", ines.header());
-        //println!("PRG rom {:#?}", ines.prg_rom().get(0..50));
+        println!("INes {:#x?}", ines.header());
     }
 }

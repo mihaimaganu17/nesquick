@@ -2,6 +2,7 @@
 mod opcode;
 
 use crate::emulator::{CpuMmu, CpuMmuError};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Represents an 8-bit 6502 microprocessor. This CPU utilizes a 16-bit memory
 /// address space, meaning there are 2^16 bytes available for memory addresses,
@@ -38,6 +39,8 @@ pub struct Cpu {
     s: u8,
     // Status register, used by the ALU, but is byte-wide.
     p: StatusRegister,
+    // How many cycles have passed so far
+    cycles: usize,
 }
 
 #[derive(Debug)]
@@ -88,22 +91,30 @@ impl From<u8> for StatusRegister {
 impl StatusRegister {
     // Convert any u8 into a boolean
     fn u8_to_bool(value: u8) -> bool {
-        if value != 0 { true } else { false }
+        if value != 0 {
+            true
+        } else {
+            false
+        }
     }
     fn bool_to_u8(value: bool) -> u8 {
-        if value == true { 1 } else { 0 }
+        if value == true {
+            1
+        } else {
+            0
+        }
     }
 
     /// Return the register as an u8
     pub fn as_u8(&self) -> u8 {
-        Self::bool_to_u8(self.carry) |
-            Self::bool_to_u8(self.zero) << 1 |
-            Self::bool_to_u8(self.int_disable) << 2 |
-            Self::bool_to_u8(self.decimal) << 3 |
-            Self::bool_to_u8(self.b_flag) << 4 |
-            Self::bool_to_u8(self.always_1) << 5 |
-            Self::bool_to_u8(self.overflow) << 6 |
-            Self::bool_to_u8(self.negative) << 7
+        Self::bool_to_u8(self.carry)
+            | Self::bool_to_u8(self.zero) << 1
+            | Self::bool_to_u8(self.int_disable) << 2
+            | Self::bool_to_u8(self.decimal) << 3
+            | Self::bool_to_u8(self.b_flag) << 4
+            | Self::bool_to_u8(self.always_1) << 5
+            | Self::bool_to_u8(self.overflow) << 6
+            | Self::bool_to_u8(self.negative) << 7
     }
 }
 
@@ -119,6 +130,7 @@ impl Cpu {
             y: 0,
             s: 0xfd,
             pc: 0x00,
+            cycles: 0,
         }
     }
 
@@ -127,13 +139,68 @@ impl Cpu {
         self.pc = pc;
     }
 
+    // Push a `value` onto the stack located in `memory`
+    fn push(&mut self, memory: &mut CpuMmu, value: u8) {
+        // Get a reference to our stack
+        if let Some(stack) = memory.stack_mut() {
+            // We index into the stack using the `s` register
+            if let Some(memory_value) = stack.get_mut(self.s as usize) {
+                // Update the value in memory
+                *memory_value = value;
+                // Update the stack pointer, wrapping it
+                self.s.wrapping_sub(1);
+            }
+        }
+    }
+
+    // Pop a value from the stack located in `memory`
+    fn pop(&mut self, memory: &mut CpuMmu) -> Option<u8> {
+        // Get a reference to our stack
+        if let Some(stack) = memory.stack_mut() {
+            // We index into the stack using the `s` register
+            if let Some(memory_value) = stack.get(self.s as usize) {
+                // Update the stack pointer, wrapping it
+                self.s.wrapping_add(1);
+                Some(*memory_value)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    // Push the current program counter onto the stack
+    fn push_pc(&mut self, memory: &mut CpuMmu) {
+        let pcl = self.pc & 0xFF;
+        let pch = (self.pc >> 8) & 0xFF;
+
+        self.push(memory, pch as u8);
+        self.push(memory, pcl as u8);
+    }
+
+    // Pop 2 values from the stack and store them into the program counter
+    fn pop_pc(&mut self, memory: &mut CpuMmu) -> Option<()> {
+        let pcl = self.pop(memory)?;
+        let pch = self.pop(memory)?;
+
+        self.pc = ((pch as u16) << 8) & (pcl as u16);
+        Some(())
+    }
+
     /// Read and execute instructions existent in the given memory, at the
     /// current program counter
     // Note: We counld convert memory into a trait and then have CpuMmu
     // implement that trait
-    pub fn execute(&mut self, memory: &mut CpuMmu) -> Result<(), CpuError> {
+    pub fn execute(&mut self, memory: Arc<Mutex<CpuMmu>>) -> Result<(), CpuError> {
         // Go until death
-        while let Ok(inst) = Instruction::from_pc(&mut self.pc, memory) {
+        while let Ok(inst) = Instruction::from_pc(&mut self.pc, memory.clone()) {
+            // Aquire the memory mutex, in order to execute any potential
+            // instructions that need the memory.
+            // The lock is automatically dropped(fancy) at the end of the
+            // enclosing scope. In our case at the end of each while iteration
+            // loop
+            let mut memory = memory.lock().unwrap();
             println!("{inst:?}");
             match inst.opcode() {
                 Opcode::Sei(_) => {
@@ -147,11 +214,18 @@ impl Cpu {
                 Opcode::Ldx(_) => {
                     // Load a byte of memory into the X register.
                     let value = match inst.addr_mode() {
-                        AddrMode::Immediate(imm) => imm,
+                        AddrMode::Immediate(imm) => *imm,
+                        AddrMode::ZeroPage(addr) => {
+                            let zp_addr = *addr as usize;
+                            let value = memory
+                                .read_u8(zp_addr)
+                                .ok_or(CpuError::MmuReadError(zp_addr))?;
+                            value
+                        }
                         _ => todo!(),
                     };
                     // Set X register to that value
-                    self.x = *value;
+                    self.x = value;
                     // Set the flags accordingly
                     self.p.zero = self.x == 0;
                     self.p.negative = (self.x >> 7 & 1) == 1;
@@ -182,7 +256,6 @@ impl Cpu {
                     // Set the flags accordingly
                     self.p.zero = self.y == 0;
                     self.p.negative = (self.y >> 7 & 1) == 1;
-
                 }
                 Opcode::Sta(_) => {
                     // Load a byte of memory into the X register.
@@ -194,12 +267,14 @@ impl Cpu {
                             let read_addr_from = usize::from(*addr_lo as u16);
                             // Read the least significant byte of the 16-bit
                             // address
-                            let addr_lo = memory.read_u8(read_addr_from)
+                            let addr_lo = memory
+                                .read_u8(read_addr_from)
                                 .ok_or(CpuError::MmuReadError(read_addr_from))?;
                             let addr_lo = addr_lo.wrapping_add(self.y);
                             // Read the most significant byte of the 16-bit
                             // address
-                            let addr_hi = memory.read_u8(read_addr_from + 1)
+                            let addr_hi = memory
+                                .read_u8(read_addr_from + 1)
                                 .ok_or(CpuError::MmuReadError(read_addr_from))?;
                             let addr = addr_hi as u16 >> 4 | addr_lo as u16;
                             addr
@@ -266,24 +341,44 @@ impl Cpu {
                     }
                 }
                 Opcode::Bit(_) => {
+                    // Get the value of the address we want to test
                     let value = match inst.addr_mode() {
                         AddrMode::Absolute(addr) => {
                             let to_read_from = usize::from(*addr);
-                            let value = memory.read_u8(to_read_from)
+                            let value = memory
+                                .read_u8(to_read_from)
                                 .ok_or(CpuError::MmuReadError(to_read_from))?;
                             value
                         }
                         _ => todo!(),
                     };
+                    // Do a memory and with the accumulator, but do not store
+                    // the result.
                     let tmp = value & self.acc;
-                    println!("value tmp {tmp}");
+                    // Fill the appropriate flags
                     self.p.zero = tmp == 0;
-                    self.p.negative = (tmp >> 7 & 1) != 0;
-                    self.p.overflow = (tmp >> 6 & 1) != 0;
+                    self.p.negative = (value >> 7 & 1) != 0;
+                    self.p.overflow = (value >> 6 & 1) != 0;
                 }
-                _ => todo!()
+                Opcode::Jsr(_) => {
+                    match inst.addr_mode() {
+                        AddrMode::Absolute(addr) => {
+                            // Push the program counter onto the stack
+                            self.push_pc(&mut *memory);
+                            // Set the new program counter
+                            self.pc = *addr;
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+
+                _ => todo!(),
             }
-            println!("Register status {self:#x?}");
+            // Add cycles to the CPU
+            self.cycles += inst.cycles();
+
+            // Print the cycles we got
+            println!("Cycles: {}", self.cycles);
         }
         Ok(())
     }
@@ -294,7 +389,7 @@ impl Cpu {
 pub struct Instruction {
     opcode: Opcode,
     addr_mode: AddrMode,
-    cycles: u8,
+    cycles: usize,
 }
 
 #[derive(Debug)]
@@ -338,16 +433,16 @@ pub enum InstructionError {
 
 impl Instruction {
     /// Reads and decodes a single instruction located at `pc` in the given `mmu`
-    pub fn from_pc(
-        pc: &mut u16,
-        mmu: &mut CpuMmu
-    ) -> Result<Self, InstructionError> {
+    pub fn from_pc(pc: &mut u16, mmu: Arc<Mutex<CpuMmu>>) -> Result<Self, InstructionError> {
+        // Acquire the lock for the memory in order to decode the instruction.
+        // Rust drops the lock at the end of this functions scope.
+        let mut mmu = mmu.lock().unwrap();
         // Read the byte at the program counter
         let Some(byte) = mmu.read_u8(usize::from(*pc)) else {
-            return Err(InstructionError::FailedToAccessPc(*pc))
+            return Err(InstructionError::FailedToAccessPc(*pc));
         };
 
-        println!("Byte {byte:x}");
+        println!("{pc:x} -> {byte:x}");
 
         // Advance the program counter
         *pc = pc
@@ -355,27 +450,21 @@ impl Instruction {
             .ok_or(InstructionError::OverflowPc)?;
 
         let inst = match byte {
-            opcode::SED => {
-                Instruction {
-                    opcode: Opcode::Sed(Sed),
-                    addr_mode: AddrMode::Implied,
-                    cycles: 2,
-                }
-            }
-            opcode::SEI => {
-                Instruction {
-                    opcode: Opcode::Sei(Sei),
-                    addr_mode: AddrMode::Implied,
-                    cycles: 2,
-                }
-            }
-            opcode::CLD => {
-                Instruction {
-                    opcode: Opcode::Cld(Cld),
-                    addr_mode: AddrMode::Implied,
-                    cycles: 2,
-                }
-            }
+            opcode::SED => Instruction {
+                opcode: Opcode::Sed(Sed),
+                addr_mode: AddrMode::Implied,
+                cycles: 2,
+            },
+            opcode::SEI => Instruction {
+                opcode: Opcode::Sei(Sei),
+                addr_mode: AddrMode::Implied,
+                cycles: 2,
+            },
+            opcode::CLD => Instruction {
+                opcode: Opcode::Cld(Cld),
+                addr_mode: AddrMode::Implied,
+                cycles: 2,
+            },
             opcode::LDX_I => {
                 // We also have to read the next byte, which is our operand
                 let Some(next_byte) = mmu.read_u8(usize::from(*pc)) else {
@@ -390,6 +479,22 @@ impl Instruction {
                     opcode: Opcode::Ldx(Ldx),
                     addr_mode: AddrMode::Immediate(next_byte),
                     cycles: 2,
+                }
+            }
+            opcode::LDX_ZP => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Ldx(Ldx),
+                    addr_mode: AddrMode::ZeroPage(addr),
+                    cycles: 3,
                 }
             }
             opcode::LDY_I => {
@@ -408,13 +513,11 @@ impl Instruction {
                     cycles: 2,
                 }
             }
-            opcode::TXS => {
-                Instruction {
-                    opcode: Opcode::Txs(Txs),
-                    addr_mode: AddrMode::Implied,
-                    cycles: 2,
-                }
-            }
+            opcode::TXS => Instruction {
+                opcode: Opcode::Txs(Txs),
+                addr_mode: AddrMode::Implied,
+                cycles: 2,
+            },
             opcode::LDA_I => {
                 // We also have to read the next byte, which is our operand
                 let Some(next_byte) = mmu.read_u8(usize::from(*pc)) else {
@@ -479,13 +582,27 @@ impl Instruction {
                     cycles: 3,
                 }
             }
-            opcode::DEY=> {
+            opcode::STX_A => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
                 Instruction {
-                    opcode: Opcode::Dey(Dey),
-                    addr_mode: AddrMode::Implied,
-                    cycles: 2,
+                    opcode: Opcode::Stx(Stx),
+                    addr_mode: AddrMode::Absolute(addr),
+                    cycles: 4,
                 }
             }
+            opcode::DEY => Instruction {
+                opcode: Opcode::Dey(Dey),
+                addr_mode: AddrMode::Implied,
+                cycles: 2,
+            },
             opcode::STA_I_Y => {
                 // We also have to read the next byte, which is our operand
                 let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
@@ -572,13 +689,11 @@ impl Instruction {
                     cycles: 4,
                 }
             }
-            opcode::DEX => {
-                Instruction {
-                    opcode: Opcode::Dex(Dex),
-                    addr_mode: AddrMode::Implied,
-                    cycles: 2,
-                }
-            }
+            opcode::DEX => Instruction {
+                opcode: Opcode::Dex(Dex),
+                addr_mode: AddrMode::Implied,
+                cycles: 2,
+            },
             _ => return Err(InstructionError::InvalidOpcode(byte)),
         };
         Ok(inst)
@@ -589,6 +704,9 @@ impl Instruction {
     }
     pub fn addr_mode(&self) -> &AddrMode {
         &self.addr_mode
+    }
+    pub fn cycles(&self) -> usize {
+        self.cycles
     }
 }
 

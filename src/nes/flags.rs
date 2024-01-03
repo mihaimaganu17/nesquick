@@ -63,7 +63,7 @@ pub enum Mirroring {
     // Vertical arrangement (CIRAM A10 = PPU A11)
     Vertical,
     // Horizontal arrangement (CIRAM A10 = PPU A10)
-    Horizontal
+    Horizontal,
 }
 
 impl From<u8> for Mirroring {
@@ -112,5 +112,9 @@ impl From<u8> for Flags7 {
 }
 
 fn u8_to_bool(value: u8) -> bool {
-    if value != 0 { true } else { false }
+    if value != 0 {
+        true
+    } else {
+        false
+    }
 }
