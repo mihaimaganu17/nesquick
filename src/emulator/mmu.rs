@@ -12,7 +12,7 @@ pub struct CpuMmu {
 }
 
 const DEFAULT_CPU_MMU_SIZE: usize = u16::MAX as usize + 1;
-const STACK_RANGE: Range<usize> = 0x0100..0x01FF;
+const STACK_RANGE: Range<usize> = 0x0100..0x0200;
 
 impl Default for CpuMmu {
     fn default() -> Self {
@@ -101,6 +101,7 @@ impl CpuMmu {
 #[derive(Debug)]
 pub enum CpuMmuError {
     OutOfBoundsAccess(Range<usize>),
+    FailedToGetPpuStatus,
 }
 
 // The PPU addresses a 14-bit (16kB) address space, $0000-3FFF,

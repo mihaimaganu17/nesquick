@@ -52,7 +52,7 @@ enum Endian {
 }
 
 // Handy trait we use to sugar coat the `read` function from the `Reader`
-trait Endianness {
+pub trait Endianness {
     fn endian() -> Endian;
 }
 

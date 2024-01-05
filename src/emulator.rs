@@ -24,7 +24,7 @@ pub struct Emulator {
 impl Emulator {
     pub fn new() -> Self {
         let cpu = Cpu::power_up();
-        let mut cpu_mmu = Arc::new(Mutex::new(CpuMmu::default()));
+        let cpu_mmu = Arc::new(Mutex::new(CpuMmu::default()));
         let ppu = Ppu::power_up(cpu_mmu.clone());
         let ppu_mmu = PpuMmu::default();
 
@@ -50,7 +50,7 @@ impl Emulator {
         let entrypoint = {
             // Acquire a lock to the CPU memory unit. The lock will drop at the
             // end of the scope
-            let mut cpu_mmu = self.cpu_mmu.lock().unwrap();
+            let cpu_mmu = self.cpu_mmu.lock().unwrap();
 
             cpu_mmu
             .read_u16_le(0xFFFC)
@@ -67,15 +67,30 @@ impl Emulator {
         // - PPU
         // Receiver
         // - Emulator
-        //let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
 
-        let mut cpu_mmu = self.cpu_mmu.clone();
+        let _cpu_thread_handle = {
+            // Clone the CPU MMU unit in order to send it to the CPU
+            let cpu_mmu = self.cpu_mmu.clone();
+            // Clone the transmitter
+            let tx = tx.clone();
 
-        let cpu_thread_handle = thread::spawn(move || -> Result<(), CpuError> {
-            self.cpu.execute(cpu_mmu)
-        });
+            thread::spawn(move || -> Result<(), CpuError> {
+                self.cpu.execute(cpu_mmu, tx)
+            })
+        };
 
-        let res = cpu_thread_handle.join();
+        // We wait until we pass 2 important CPU milestones, to mimic the
+        // behaviour of the PPU, which is:
+        // The Vblank flag in PPUSTATUS bit 8 is set once around cycle 27384
+        let mut cycles = rx.recv().unwrap();
+
+        while cycles < 27384 {
+            println!("Cycles {}", cycles);
+            cycles = rx.recv().unwrap();
+        }
+
+        //let res = cpu_thread_handle.join();
 
         Ok(())
     }
@@ -108,7 +123,7 @@ mod test {
 
     #[test]
     fn emu_cpu_mmu() {
-        let path = "testdata/color_test.nes";
+        let path = "testdata/cpu_dummy_reads.nes";
         let data = std::fs::read(path).expect("Failed to read file from disk");
         let mut reader = Reader::new(data);
         let ines = INes::parse(&mut reader).expect("Failed to parse INes");

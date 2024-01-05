@@ -148,15 +148,6 @@ impl SpriteSize {
 #[derive(Debug)]
 pub struct PpuMask;
 
-/// Description: PPU status register
-/// Access: read
-/// This register reflects the state of various functions inside the PPU. It is
-/// often used for determining timing. To determine when the PPU has reached a
-/// given pixel of the screen, put an opaque (non-transparent) pixel of
-/// sprite 0 there.
-#[derive(Debug)]
-pub struct PpuStatus;
-
 // Macro that implements the trait `MemoryMappedReg` for memory mapped PPU
 // registers in the CPU's memory.
 macro_rules! memory_map_ppu_reg {
@@ -189,6 +180,29 @@ macro_rules! memory_map_ppu_reg {
 
 memory_map_ppu_reg!(PpuCtrl, 0x2000);
 memory_map_ppu_reg!(PpuMask, 0x2001);
+
+/// Description: PPU status register
+/// Access: read
+/// This register reflects the state of various functions inside the PPU. It is
+/// often used for determining timing. To determine when the PPU has reached a
+/// given pixel of the screen, put an opaque (non-transparent) pixel of
+/// sprite 0 there.
+#[derive(Debug)]
+struct PpuStatus;
+
+impl PpuStatus {
+    /// Sets the vertical blank bit, which is bit 7 of the register
+    pub fn set_vblank(&self, cpu_mmu: &mut CpuMmu) -> Result<(), CpuMmuError> {
+        if let Some(tmp_status) = self.get(cpu_mmu) {
+            // We set the last bit (bit 7, counting from 0) of the status
+            let new_status = tmp_status | 0b1000_0000;
+            // Write changes
+            self.set(cpu_mmu, new_status)
+        } else {
+            Err(CpuMmuError::FailedToGetPpuStatus)
+        }
+    }
+}
 
 impl MemoryMappedReg for PpuStatus {
     const CPU_ADDR: u16 = 0x2002;
@@ -249,6 +263,16 @@ impl Ppu {
            ppu_status,
         }
     }
+
+    pub fn set_vblank(
+        &self,
+        cpu_mmu: Arc<Mutex<CpuMmu>>,
+    ) -> Result<(), CpuMmuError> {
+        // Acquire the lock to write memory
+        let mut cpu_mmu = cpu_mmu.lock().unwrap();
+        // Set vblank flag
+        self.ppu_status.set_vblank(&mut *cpu_mmu)
+    }
 }
 
 #[cfg(test)]
@@ -261,7 +285,7 @@ mod tests {
             let ppu_reg = $reg;
 
             // Set the register
-            ppu_reg.set(&mut cpu_mmu, $value);
+            ppu_reg.set(&mut cpu_mmu, $value).expect("Cannot set the PPU register");
 
             let ppu_reg_value = ppu_reg.get(&cpu_mmu)
                 .expect("Failed to fetch ppu reg");
