@@ -14,7 +14,11 @@ impl Reader {
     pub fn read_bytes(&mut self, nbytes: usize) -> Result<&[u8], ReaderError> {
         // Get the desired slice from the buffer
         let Some(bytes) = self.data.get(self.pos..self.pos + nbytes) else {
-            return Err(ReaderError::OutOfBounds(RangeToRead::from(self.pos, self.data.len(), nbytes)));
+            return Err(ReaderError::OutOfBounds(RangeToRead::from(
+                self.pos,
+                self.data.len(),
+                nbytes,
+            )));
         };
         // Increment the position by the amount of read bytes
         self.pos += nbytes;
@@ -33,6 +37,11 @@ impl Reader {
 
         Ok(primitive)
     }
+
+    /// Return number of bytes left to read
+    pub fn bytes_left(&self) -> usize {
+        self.data.len() - self.pos
+    }
 }
 
 // Type of endian we can parse
@@ -43,7 +52,7 @@ enum Endian {
 }
 
 // Handy trait we use to sugar coat the `read` function from the `Reader`
-trait Endianness {
+pub trait Endianness {
     fn endian() -> Endian;
 }
 
@@ -55,11 +64,15 @@ pub struct BE;
 pub struct LE;
 
 impl Endianness for BE {
-    fn endian() -> Endian { Endian::Big }
+    fn endian() -> Endian {
+        Endian::Big
+    }
 }
 
 impl Endianness for LE {
-    fn endian() -> Endian { Endian::Little }
+    fn endian() -> Endian {
+        Endian::Little
+    }
 }
 
 /// Implementors of this trait are able to utilize the `Reader` interface to be parsed directly
@@ -77,7 +90,11 @@ impl PrimitiveFromBytes for u8 {
     fn from_bytes_be(bytes: &[u8]) -> Result<Self, ReaderError> {
         let size = std::mem::size_of::<Self>();
         let Some(value) = bytes.get(0) else {
-            return Err(ReaderError::OutOfBounds(RangeToRead::from(0, bytes.len(), size)));
+            return Err(ReaderError::OutOfBounds(RangeToRead::from(
+                0,
+                bytes.len(),
+                size,
+            )));
         };
         Ok(*value)
     }

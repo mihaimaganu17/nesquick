@@ -28,6 +28,12 @@ pub struct Flags6 {
     mapper_low_4bits: u8,
 }
 
+impl Flags6 {
+    pub fn trainer(&self) -> bool {
+        self.trainer
+    }
+}
+
 impl From<u8> for Flags6 {
     fn from(flags: u8) -> Self {
         // Extract the needed information from the flags
@@ -57,7 +63,7 @@ pub enum Mirroring {
     // Vertical arrangement (CIRAM A10 = PPU A11)
     Vertical,
     // Horizontal arrangement (CIRAM A10 = PPU A10)
-    Horizontal
+    Horizontal,
 }
 
 impl From<u8> for Mirroring {
@@ -106,5 +112,9 @@ impl From<u8> for Flags7 {
 }
 
 fn u8_to_bool(value: u8) -> bool {
-    if value != 0 { true } else { false }
+    if value != 0 {
+        true
+    } else {
+        false
+    }
 }
