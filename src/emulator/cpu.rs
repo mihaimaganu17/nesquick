@@ -1,7 +1,9 @@
 //! Module representing a NES 6502 CPU(without a decimal mode)
 mod opcode;
+mod addr;
 
 use crate::emulator::{CpuMmu, CpuMmuError};
+use addr::{AddrMode, AddrModeError, Idx, SupportedAddrMode};
 use std::sync::{Arc, Mutex, mpsc};
 
 /// Represents an 8-bit 6502 microprocessor. This CPU utilizes a 16-bit memory
@@ -41,12 +43,6 @@ pub struct Cpu {
     p: StatusRegister,
     // How many cycles have passed so far
     cycles: usize,
-}
-
-#[derive(Debug)]
-pub enum Idx {
-    X,
-    Y,
 }
 
 #[derive(Debug)]
@@ -187,12 +183,14 @@ impl Cpu {
     }
 
     // Push the current program counter onto the stack
-    fn push_pc(&mut self, memory: &mut CpuMmu) {
+    fn push_pc(&mut self, memory: &mut CpuMmu) -> Option<()> {
         let pcl = self.pc & 0xFF;
         let pch = (self.pc >> 8) & 0xFF;
 
-        self.push(memory, pch as u8);
-        self.push(memory, pcl as u8);
+        self.push(memory, pch as u8)?;
+        self.push(memory, pcl as u8)?;
+
+        Some(())
     }
 
     // Pop 2 values from the stack and store them into the program counter
@@ -223,6 +221,22 @@ impl Cpu {
             let mut memory = memory.lock().unwrap();
             println!("{inst:?}");
             match inst.opcode() {
+                Opcode::Brk(_) => {
+                    // Store the program counter on the stack
+                    self.push_pc(&mut *memory)
+                        .ok_or(CpuError::CannotPushPc)?;
+                    // Push the CPU status flags as well
+                    self.push(&mut *memory, self.p.as_u8())
+                        .ok_or(CpuError::CannotPushStatusRegister)?;
+
+                    // Prepare address that contains Interrupt vector location
+                    let int_vec_addr: usize= 0xFFFEu16 as usize;
+
+                    // Load the program counter with addres from 0xFFFE
+                    self.pc = memory.read_u16_le(int_vec_addr)
+                        .ok_or(CpuError::MmuReadError(int_vec_addr))?;
+                    break;
+                }
                 Opcode::Sei(_) => {
                     // Set the interrupt disable flag to one.
                     self.p.int_disable = true;
@@ -322,30 +336,23 @@ impl Cpu {
                     self.p.negative = (self.y >> 7 & 1) == 1;
                 }
                 Opcode::Sta(_) => {
-                    // Load a byte of memory into the X register.
-                    let addr: u16 = match inst.addr_mode() {
-                        AddrMode::Absolute(abs_addr) => *abs_addr,
-                        AddrMode::ZeroPage(addr) => *addr as u16,
-                        AddrMode::IndirectIndexed(_, addr_lo) => {
-                            // Convert into a u16 address
-                            let read_addr_from = usize::from(*addr_lo as u16);
-                            // Read the least significant byte of the 16-bit
-                            // address
-                            let addr_lo = memory
-                                .read_u8(read_addr_from)
-                                .ok_or(CpuError::MmuReadError(read_addr_from))?;
-                            let addr_lo = addr_lo.wrapping_add(self.y);
-                            // Read the most significant byte of the 16-bit
-                            // address
-                            let addr_hi = memory
-                                .read_u8(read_addr_from + 1)
-                                .ok_or(CpuError::MmuReadError(read_addr_from))?;
-                            let addr = addr_hi as u16 >> 4 | addr_lo as u16;
-                            addr
-                        }
-                        _ => todo!(),
-                    };
-                    memory.set_bytes(usize::from(addr), &[self.acc])?;
+                    // Nominate the supported addressing modes for this
+                    // instruction.
+                    let supp_addr_mode = SupportedAddrMode::ZEROPAGE
+                        | SupportedAddrMode::ZEROPAGE_X
+                        | SupportedAddrMode::ABSOLUTE
+                        | SupportedAddrMode::ABSOLUTE_X
+                        | SupportedAddrMode::ABSOLUTE_Y
+                        | SupportedAddrMode::INDEXED_INDIRECT_X
+                        | SupportedAddrMode::INDIRECT_INDEXED_Y;
+                    // Decode the address we want to use
+                    let addr: usize = inst.addr_mode()
+                        .decode_group_one_op(
+                            &*memory,
+                            &self,
+                            supp_addr_mode,
+                        )?;
+                    memory.set_bytes(addr, &[self.acc])?;
                 }
                 Opcode::Stx(_) => {
                     // Load a byte of memory into the X register.
@@ -560,6 +567,17 @@ impl Cpu {
                         _ => unreachable!(),
                     }
                 }
+                Opcode::Rti(_) => {
+                    match inst.addr_mode() {
+                        AddrMode::Implied => {
+                            self.acc = self.pop(&mut *memory)
+                                .ok_or(CpuError::CannotPullAcc)?;
+                            self.p = StatusRegister::from(self.pop(&mut *memory)
+                                .ok_or(CpuError::CannotPullStatusRegister)?);
+                        }
+                        _ => unreachable!(),
+                    }
+                }
                 Opcode::Adc(_) => {
                     // Get the value we want to subtract from
                     let value = match inst.addr_mode() {
@@ -617,6 +635,24 @@ impl Cpu {
                     self.p.zero = self.y == 0;
                     self.p.negative = (self.y >> 7) == 1;
                 },
+                Opcode::Pha(_) => {
+                    self.push(&mut *memory, self.acc)
+                        .ok_or(CpuError::CannotPushAcc)?;
+                },
+                Opcode::Php(_) => {
+                    self.push(&mut *memory, self.p.as_u8())
+                        .ok_or(CpuError::CannotPushStatusRegister)?;
+                },
+                Opcode::Pla(_) => {
+                    self.acc = self.pop(&mut *memory)
+                        .ok_or(CpuError::CannotPullAcc)?;
+                    self.p.negative = (self.acc >> 7 & 1) == 1;
+                    self.p.zero = self.acc == 0;
+                },
+                Opcode::Plp(_) => {
+                    self.p = StatusRegister::from(self.pop(&mut *memory)
+                        .ok_or(CpuError::CannotPullStatusRegister)?);
+                },
                 _ => todo!(),
             }
             // Add cycles to the CPU
@@ -660,6 +696,8 @@ pub struct Instruction {
 
 #[derive(Debug)]
 pub enum Opcode {
+    // The break instruction forces the generation of an interrupt request.
+    Brk(Brk),
     // Set the decimal flag
     Sed(Sed),
     // Set the interrupt disable flag.
@@ -714,6 +752,8 @@ pub enum Opcode {
     Iny(Iny),
     // RTS - Return from Subroutine
     Rts(Rts),
+    // RTI - Return from Interrupt
+    Rti(Rti),
     // ADC - Add with carry
     Adc(Adc),
     // SBC - Substract with carry
@@ -734,6 +774,14 @@ pub enum Opcode {
     Txs(Txs),
     // TYA - Transfer Y to Accumulator
     Tya(Tya),
+    // PHA - Push Accumulator
+    Pha(Pha),
+    // PLA - Pull Accumulator
+    Pla(Pla),
+    // PHP - Push processor status
+    Php(Php),
+    // PLP - Pull processor status
+    Plp(Plp),
 }
 
 #[derive(Debug)]
@@ -763,6 +811,11 @@ impl Instruction {
             .ok_or(InstructionError::OverflowPc)?;
 
         let inst = match byte {
+            opcode::BRK => Instruction {
+                opcode: Opcode::Brk(Brk),
+                addr_mode: AddrMode::Implied,
+                cycles: 7,
+            },
             opcode::SED => Instruction {
                 opcode: Opcode::Sed(Sed),
                 addr_mode: AddrMode::Implied,
@@ -975,7 +1028,7 @@ impl Instruction {
 
                 Instruction {
                     opcode: Opcode::Sta(Sta),
-                    addr_mode: AddrMode::IndirectIndexed(Idx::Y, addr),
+                    addr_mode: AddrMode::IndirectIndexedY(addr),
                     cycles: 6,
                 }
             }
@@ -1193,6 +1246,11 @@ impl Instruction {
                 addr_mode: AddrMode::Implied,
                 cycles: 6,
             },
+            opcode::RTI => Instruction {
+                opcode: Opcode::Rti(Rti),
+                addr_mode: AddrMode::Implied,
+                cycles: 6,
+            },
             opcode::SBC_A => {
                 // We also have to read the next 2 bytes, which is our operand
                 let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
@@ -1268,6 +1326,34 @@ impl Instruction {
                     cycles: 2,
                 }
             }
+            opcode::PHA => {
+                Instruction {
+                    opcode: Opcode::Pha(Pha),
+                    addr_mode: AddrMode::Implied,
+                    cycles: 3,
+                }
+            }
+            opcode::PLA => {
+                Instruction {
+                    opcode: Opcode::Pla(Pla),
+                    addr_mode: AddrMode::Implied,
+                    cycles: 4,
+                }
+            }
+            opcode::PHP => {
+                Instruction {
+                    opcode: Opcode::Php(Php),
+                    addr_mode: AddrMode::Implied,
+                    cycles: 3,
+                }
+            }
+            opcode::PLP => {
+                Instruction {
+                    opcode: Opcode::Plp(Plp),
+                    addr_mode: AddrMode::Implied,
+                    cycles: 4,
+                }
+            }
             _ => return Err(InstructionError::InvalidOpcode(byte)),
         };
         Ok(inst)
@@ -1284,6 +1370,8 @@ impl Instruction {
     }
 }
 
+#[derive(Debug)]
+pub struct Brk;
 #[derive(Debug)]
 pub struct Sed;
 #[derive(Debug)]
@@ -1339,6 +1427,8 @@ pub struct Iny;
 #[derive(Debug)]
 pub struct Rts;
 #[derive(Debug)]
+pub struct Rti;
+#[derive(Debug)]
 pub struct Adc;
 #[derive(Debug)]
 pub struct Sbc;
@@ -1358,96 +1448,26 @@ pub struct Txa;
 pub struct Txs;
 #[derive(Debug)]
 pub struct Tya;
-
-/// When the CPU fetches an opcode, besides decoding the assembly instruction,
-/// it will also decode and addressing mode that will determine the number
-/// of bytes needed for operands. There are 13 such addresing modes.
 #[derive(Debug)]
-pub enum AddrMode {
-    // For many 6502 instructions the source and destination of the information
-    // to be manipulated is implied directly by the function of the instruction
-    // itself and no further operand needs to be specified. Operations like
-    // 'Clear Carry Flag' (CLC) and 'Return from Subroutine' (RTS) are
-    // implicit.
-    Implied,
-    // Immediate addressing allows the programmer to directly specify an 8 bit
-    // constant within the instruction. It is indicated by a '#' symbol
-    // followed by an numeric expression.
-    // When decoding, the immediate numerical byte is followed directly after
-    // the instruction byte
-    Immediate(u8),
-    // Instructions using absolute addressing contain a full 16 bit address to
-    // identify the target location.
-    Absolute(u16),
-    // An instruction using zero page addressing mode has only an 8 bit address
-    // operand. This limits it to addressing only the first 256 bytes of memory
-    // (e.g. $0000 to $00FF) where the most significant byte of the address is
-    // always zero. In zero page mode only the least significant byte of the
-    // address is held in the instruction making it shorter by one byte
-    // (important for space saving) and one less memory fetch during execution
-    // (important for speed).
-    //
-    // An assembler will automatically select zero page addressing mode if the
-    // operand evaluates to a zero page address and the instruction supports
-    // the mode (not all do).
-    // Zero page is wrapping aroung 256. Ex: (223 + 130) MOD 256 = 97;
-    ZeroPage(u8),
-    // Indirect Indexed
-    // Indirect indexed addressing is the most common indirection mode used
-    // on the 6502. In instruction contains the zero page location of the least
-    // significant byte of 16 bit address. The Y register is dynamically added
-    // to this value to generated the actual target address for operation.
-    IndirectIndexed(Idx, u8),
-    // Relative
-    // Relative addressing mode is used by branch instructions
-    // (e.g. BEQ, BNE, etc.) which contain a signed 8 bit relative offset
-    // (e.g. -128 to +127) which is added to program counter if the condition
-    // is true. As the program counter itself is incremented during instruction
-    // execution by two the effective address range for the target instruction
-    // must be with -126 to +129 bytes of the branch.
-    Relative(i8),
-}
-
-impl AddrMode {
-    /*
-    // Decodes the operand based on the addressing mode
-    pub fn decode_group_one_op(&self, mmu: &mut CpuMmu) -> Result<u8, AddrModeError> {
-        // Load a byte of memory into the X register.
-        let value = match self {
-            AddrMode::Implied => {
-                return Err(AddrModeError::ImpliedAlreadyDecoded);
-            }
-            AddrMode::Immediate(imm) => *imm,
-            AddrMode::Absolute(addr) => {
-                let addr = *addr as usize;
-                let value = mmu.read_u8(addr)
-                    .ok_or(AddrModeError::MmuReadError(addr))?;
-                value
-            }
-            AddrMode::ZeroPage(addr) => {
-                let zp_addr = *addr as usize;
-                let value = mmu
-                    .read_u8(zp_addr)
-                    .ok_or(AddrModeError::MmuReadError(zp_addr))?;
-                value
-            }
-        };
-        Ok(value)
-    }
-    */
-}
-
+pub struct Pha;
 #[derive(Debug)]
-pub enum AddrModeError {
-    MmuReadError(usize),
-    ImpliedAlreadyDecoded,
-}
+pub struct Pla;
+#[derive(Debug)]
+pub struct Php;
+#[derive(Debug)]
+pub struct Plp;
 
 #[derive(Debug)]
 pub enum CpuError {
     CpuMmuError(CpuMmuError),
     AddrModeError(AddrModeError),
     MmuReadError(usize),
+    CannotPushPc,
+    CannotPushStatusRegister,
+    CannotPushAcc,
+    CannotPullPc,
+    CannotPullAcc,
+    CannotPullStatusRegister,
 }
 
 impl From<CpuMmuError> for CpuError {

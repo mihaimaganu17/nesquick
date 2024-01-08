@@ -1,5 +1,10 @@
 //! Module that holds opcode constants and definitions
 
+/// The BRK instruction forces the generation of an interrupt request. The
+/// program counter and processor status are pushed on the stack then the IRQ
+/// interrupt vector at $FFFE/F is loaded into the PC and the break flag in the
+/// status set to one. Set the decimal mode flag to one.
+pub const BRK: u8 = 0x00;
 /// Set the decimal mode flag to one.
 pub const SED: u8 = 0xF8;
 /// Set the interrupt disable flag to one.
@@ -101,6 +106,10 @@ pub const INY: u8 = 0xC8;
 /// The RTS instruction is used at the end of a subroutine to return to the
 /// calling routine. It pulls the program counter (minus one) from the stack.
 pub const RTS: u8 = 0x60;
+/// RTI - Return from Interrupt
+/// The RTI instruction is used at the end of an interrupt processing routine.
+/// It pulls the processor flags from the stack followed by the program counter.
+pub const RTI: u8 = 0x40;
 /// SBC - Subtract with Carry
 /// This instruction subtracts the contents of a memory location to the
 /// accumulator together with the not of the carry bit. If overflow occurs the
@@ -175,3 +184,18 @@ pub const TXS: u8 = 0x9A;
 /// Copies the current contents of the Y register into the accumulator and sets
 /// the zero and negative flags as appropriate.
 pub const TYA: u8 = 0x98;
+
+/// PHA - Push Accumulator
+/// Pushes a copy of the accumulator on to the stack.
+pub const PHA: u8 = 0x48;
+/// PHP - Push Processor Status
+/// Pushes a copy of the status flags on to the stack.
+pub const PHP: u8 = 0x08;
+/// PLA - Pull Accumulator
+/// Pulls an 8 bit value from the stack and into the accumulator. The zero and
+/// negative flags are set as appropriate.
+pub const PLA: u8 = 0x68;
+/// PLP - Pull Processor Status
+/// Pulls an 8 bit value from the stack and into the processor flags. The flags
+/// will take on new states as determined by the value pulled.
+pub const PLP: u8 = 0x28;
