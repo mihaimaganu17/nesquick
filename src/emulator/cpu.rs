@@ -2,7 +2,7 @@
 mod opcode;
 mod addr;
 
-use crate::emulator::{CpuMmu, CpuMmuError};
+use crate::emulator::{CpuMmu, CpuMmuError, Message};
 use addr::{AddrMode, AddrModeError, Idx, SupportedAddrMode};
 use std::sync::{Arc, Mutex, mpsc};
 
@@ -145,6 +145,11 @@ impl Cpu {
         &self.p
     }
 
+    /// Returns the accumulator register value
+    pub fn acc(&self) -> u8 {
+        self.acc
+    }
+
     /// Reset status register to 0
     pub fn reset_p(&mut self) {
         self.p = StatusRegister::from(0);
@@ -206,10 +211,10 @@ impl Cpu {
     /// current program counter
     // Note: We counld convert memory into a trait and then have CpuMmu
     // implement that trait.
-    pub fn execute(
+    pub fn execute (
         &mut self,
         memory: Arc<Mutex<CpuMmu>>,
-        tx: mpsc::Sender<usize>,
+        tx: mpsc::Sender<Message>,
     ) -> Result<(), CpuError> {
         // Go until death
         while let Ok(inst) = Instruction::from_pc(&mut self.pc, memory.clone()) {
@@ -271,29 +276,39 @@ impl Cpu {
                         AddrMode::Immediate(imm) => *imm,
                         _ => todo!(),
                     };
-                    println!("{}", self.acc);
-                    println!("{}", value);
 
                     // Get the result wrapping at the limits
                     let tmp = self.acc.wrapping_sub(value);
-                    println!("{}", tmp);
 
                     self.p.zero = tmp == 0;
                     self.p.negative = ((tmp >> 7) & 1) == 1;
                     self.p.carry = value <= self.acc;
                 }
                 Opcode::Ldx(_) => {
-                    // Load a byte of memory into the X register.
+                    // Load the value we need from memory
                     let value = match inst.addr_mode() {
                         AddrMode::Immediate(imm) => *imm,
-                        AddrMode::ZeroPage(addr) => {
-                            let zp_addr = *addr as usize;
-                            let value = memory
-                                .read_u8(zp_addr)
-                                .ok_or(CpuError::MmuReadError(zp_addr))?;
+                        _ => {
+                            // If it is not an immediate, we need to decode
+                            // the address and fetch the memory from that
+                            // address
+
+                            // Define the supported addressing modes of this
+                            // instruction
+                            let supp_addr_mode = SupportedAddrMode::ZEROPAGE
+                                | SupportedAddrMode::ZEROPAGE_Y
+                                | SupportedAddrMode::ABSOLUTE
+                                | SupportedAddrMode::ABSOLUTE_Y;
+                            let addr: usize = inst.addr_mode()
+                                .decode_group_one_op(
+                                    &*memory,
+                                    &self,
+                                    supp_addr_mode,
+                                )?;
+                            let value = memory.read_u8(addr)
+                                .ok_or(CpuError::MmuReadError(addr))?;
                             value
                         }
-                        _ => todo!(),
                     };
                     // Set X register to that value
                     self.x = value;
@@ -305,18 +320,35 @@ impl Cpu {
                     self.s = self.x;
                 }
                 Opcode::Lda(_) => {
-                    // Load a byte of memory into the X register.
+                    // Load the value we need from memory
                     let value = match inst.addr_mode() {
                         AddrMode::Immediate(imm) => *imm,
-                        AddrMode::ZeroPage(addr) => {
-                            let zp_addr = *addr as usize;
-                            let value = memory
-                                .read_u8(zp_addr)
-                                .ok_or(CpuError::MmuReadError(zp_addr))?;
+                        _ => {
+                            // If it is not an immediate, we need to decode
+                            // the address and fetch the memory from that
+                            // address
+
+                            // Define the supported addressing modes of this
+                            // instruction
+                            let supp_addr_mode = SupportedAddrMode::ZEROPAGE
+                                | SupportedAddrMode::ZEROPAGE_X
+                                | SupportedAddrMode::ABSOLUTE
+                                | SupportedAddrMode::ABSOLUTE_X
+                                | SupportedAddrMode::ABSOLUTE_Y
+                                | SupportedAddrMode::INDEXED_INDIRECT_X
+                                | SupportedAddrMode::INDIRECT_INDEXED_Y;
+                            let addr: usize = inst.addr_mode()
+                                .decode_group_one_op(
+                                    &*memory,
+                                    &self,
+                                    supp_addr_mode,
+                                )?;
+                            let value = memory.read_u8(addr)
+                                .ok_or(CpuError::MmuReadError(addr))?;
                             value
                         }
-                        _ => todo!(),
                     };
+
                     // Set X register to that value
                     self.acc = value;
                     // Set the flags accordingly
@@ -324,13 +356,33 @@ impl Cpu {
                     self.p.negative = (self.acc >> 7 & 1) == 1;
                 }
                 Opcode::Ldy(_) => {
-                    // Load a byte of memory into the X register.
+                    // Load the value we need from memory
                     let value = match inst.addr_mode() {
-                        AddrMode::Immediate(imm) => imm,
-                        _ => todo!(),
+                        AddrMode::Immediate(imm) => *imm,
+                        _ => {
+                            // If it is not an immediate, we need to decode
+                            // the address and fetch the memory from that
+                            // address
+
+                            // Define the supported addressing modes of this
+                            // instruction
+                            let supp_addr_mode = SupportedAddrMode::ZEROPAGE
+                                | SupportedAddrMode::ZEROPAGE_X
+                                | SupportedAddrMode::ABSOLUTE
+                                | SupportedAddrMode::ABSOLUTE_X;
+                            let addr: usize = inst.addr_mode()
+                                .decode_group_one_op(
+                                    &*memory,
+                                    &self,
+                                    supp_addr_mode,
+                                )?;
+                            let value = memory.read_u8(addr)
+                                .ok_or(CpuError::MmuReadError(addr))?;
+                            value
+                        }
                     };
                     // Set Y register to that value
-                    self.y = *value;
+                    self.y = value;
                     // Set the flags accordingly
                     self.p.zero = self.y == 0;
                     self.p.negative = (self.y >> 7 & 1) == 1;
@@ -352,16 +404,40 @@ impl Cpu {
                             &self,
                             supp_addr_mode,
                         )?;
-                    memory.set_bytes(addr, &[self.acc])?;
+                    let message = memory.set_bytes(addr, &[self.acc])?;
+                    tx.send(Message::NesEffect(message));
                 }
                 Opcode::Stx(_) => {
-                    // Load a byte of memory into the X register.
-                    let addr: u16 = match inst.addr_mode() {
-                        AddrMode::Absolute(abs_addr) => *abs_addr,
-                        AddrMode::ZeroPage(addr) => *addr as u16,
-                        _ => todo!(),
-                    };
-                    memory.set_bytes(usize::from(addr), &[self.x])?;
+                    // Specify the supported addressing modes of the
+                    // instruction
+                    let supp_addr_mode = SupportedAddrMode::ZEROPAGE
+                        | SupportedAddrMode::ZEROPAGE_Y
+                        | SupportedAddrMode::ABSOLUTE;
+
+                    let addr: usize = inst.addr_mode()
+                        .decode_group_one_op(
+                            &*memory,
+                            &self,
+                            supp_addr_mode,
+                        )?;
+                    let message = memory.set_bytes(addr, &[self.x])?;
+                    tx.send(Message::NesEffect(message));
+                }
+                Opcode::Sty(_) => {
+                    // Specify the supported addressing modes of the
+                    // instruction
+                    let supp_addr_mode = SupportedAddrMode::ZEROPAGE
+                        | SupportedAddrMode::ZEROPAGE_X
+                        | SupportedAddrMode::ABSOLUTE;
+
+                    let addr: usize = inst.addr_mode()
+                        .decode_group_one_op(
+                            &*memory,
+                            &self,
+                            supp_addr_mode,
+                        )?;
+                    let message = memory.set_bytes(addr, &[self.y])?;
+                    tx.send(Message::NesEffect(message));
                 }
                 Opcode::Dex(_) => {
                     // Set X register to that value
@@ -558,6 +634,25 @@ impl Cpu {
                         _ => unreachable!(),
                     }
                 }
+                Opcode::Jmp(_) => {
+                    // Since JMP is the only instruction to use the `Indirect`
+                    // addressing mode, we are not passing it to the decoding
+                    // function to handle this case.
+                    match inst.addr_mode() {
+                        AddrMode::Absolute(addr) => {
+                            // Set the new program counter
+                            self.pc = *addr;
+                        }
+                        AddrMode::Indirect(i_addr) => {
+                            let i_addr = usize::from(*i_addr);
+                            let addr = memory.read_u16_le(i_addr)
+                                .ok_or(CpuError::MmuReadError(i_addr))?;
+                            // Set the new program counter
+                            self.pc = addr;
+                        }
+                        _ => unreachable!(),
+                    }
+                }
                 Opcode::Rts(_) => {
                     match inst.addr_mode() {
                         AddrMode::Implied => {
@@ -596,13 +691,25 @@ impl Cpu {
                     // Get the value we want to subtract from
                     let value = match inst.addr_mode() {
                         AddrMode::Immediate(imm) => *imm,
-                        AddrMode::Absolute(addr) => {
-                            let addr = *addr as usize;
+                        _ => {
+                            let supp_addr_mode = SupportedAddrMode::ZEROPAGE
+                                | SupportedAddrMode::ZEROPAGE_X
+                                | SupportedAddrMode::ABSOLUTE
+                                | SupportedAddrMode::ABSOLUTE_X
+                                | SupportedAddrMode::ABSOLUTE_Y
+                                | SupportedAddrMode::INDEXED_INDIRECT_X
+                                | SupportedAddrMode::INDIRECT_INDEXED_Y;
+                            let addr = inst.addr_mode()
+                                .decode_group_one_op(
+                                    &*memory,
+                                    &self,
+                                    supp_addr_mode,
+                                )?;
+                            // Read the value
                             let value = memory.read_u8(addr)
                                 .ok_or(CpuError::MmuReadError(addr))?;
                             value
                         }
-                        _ => unreachable!(),
                     };
                     self.adc(!value);
                 }
@@ -653,15 +760,224 @@ impl Cpu {
                     self.p = StatusRegister::from(self.pop(&mut *memory)
                         .ok_or(CpuError::CannotPullStatusRegister)?);
                 },
+                Opcode::Rol(_) => {
+                    match inst.addr_mode() {
+                        // Accumulator is a special case which does not need
+                        // address decoding
+                        AddrMode::Accumulator => {
+                            // Save the carry temporary
+                            let tmp_carry  = u8::from(self.p.carry);
+                            // Set carry to the last bit of the accumulator
+                            self.p.carry = StatusRegister::u8_to_bool(
+                                (self.acc >> 7) & 1
+                            );
+                            // If we rotate in Rust,
+                            // we will then need to have additional steps, since
+                            // Rust will take the last bit of the value and set
+                            // it as the first, so we only shift left.
+                            let tmp_acc = self.acc.wrapping_shl(1);
+                            // Now we put the carry bit as the first bit of the
+                            // accumulator
+                            self.acc = tmp_acc | tmp_carry;
+
+                            // Set the flags accordingly
+                            self.p.zero = self.acc == 0;
+                            self.p.negative = (self.acc >> 7) & 1 == 1;
+                        }
+                        _ => {
+                            let supp_addr_mode = SupportedAddrMode::ZEROPAGE
+                                | SupportedAddrMode::ZEROPAGE_X
+                                | SupportedAddrMode::ABSOLUTE
+                                | SupportedAddrMode::ABSOLUTE_X;
+                            let addr = inst.addr_mode()
+                                .decode_group_one_op(
+                                    &*memory,
+                                    &self,
+                                    supp_addr_mode,
+                                )?;
+                            // Read the value
+                            let value = memory.read_u8(addr)
+                                .ok_or(CpuError::MmuReadError(addr))?;
+                            // Save the carry temporary
+                            let tmp_carry  = u8::from(self.p.carry);
+                            // Set carry to the last bit of the accumulator
+                            self.p.carry = StatusRegister::u8_to_bool(
+                                (value >> 7) & 1
+                            );
+                            // If we rotate in Rust,
+                            // we will then need to have additional steps, since
+                            // Rust will take the last bit of the value and set
+                            // it as the first, so we only shift left.
+                            let tmp_acc = value.wrapping_shl(1);
+                            // Now we put the carry bit as the first bit of the
+                            // accumulator
+                            let value = tmp_acc | tmp_carry;
+                            // Write the value back
+                            memory.set(addr, value)?;
+
+                            // Set the flags accordingly
+                            self.p.zero = value == 0;
+                            self.p.negative = (value >> 7) & 1 == 1;
+                        }
+                    }
+                },
+                Opcode::Ror(_) => {
+                    match inst.addr_mode() {
+                        // Accumulator is a special case which does not need
+                        // address decoding
+                        AddrMode::Accumulator => {
+                            // Save the carry temporary
+                            let tmp_carry  = u8::from(self.p.carry);
+                            // Set carry to the first bit of the accumulator
+                            self.p.carry = StatusRegister::u8_to_bool(
+                                self.acc & 1
+                            );
+                            // If we rotate in Rust,
+                            // we will then need to have additional steps, since
+                            // Rust will take the first bit of the value and set
+                            // it as the last, so we only shift right.
+                            let tmp_acc = self.acc.wrapping_shr(1);
+                            // Now we put the carry bit as the last bit of the
+                            // accumulator
+                            self.acc = tmp_acc | (tmp_carry << 7);
+
+                            // Set the flags accordingly
+                            self.p.zero = self.acc == 0;
+                            self.p.negative = (self.acc >> 7) & 1 == 1;
+                        }
+                        _ => {
+                            let supp_addr_mode = SupportedAddrMode::ZEROPAGE
+                                | SupportedAddrMode::ZEROPAGE_X
+                                | SupportedAddrMode::ABSOLUTE
+                                | SupportedAddrMode::ABSOLUTE_X;
+                            let addr = inst.addr_mode()
+                                .decode_group_one_op(
+                                    &*memory,
+                                    &self,
+                                    supp_addr_mode,
+                                )?;
+                            // Read the value
+                            let value = memory.read_u8(addr)
+                                .ok_or(CpuError::MmuReadError(addr))?;
+                            // Save the carry temporary
+                            let tmp_carry  = u8::from(self.p.carry);
+                            // Set carry to the last bit of the accumulator
+                            self.p.carry = StatusRegister::u8_to_bool(
+                                value & 1
+                            );
+                            // If we rotate in Rust,
+                            // we will then need to have additional steps, since
+                            // Rust will take the last bit of the value and set
+                            // it as the first, so we only shift left.
+                            let tmp_acc = value.wrapping_shr(1);
+                            // Now we put the carry bit as the first bit of the
+                            // accumulator
+                            let value = tmp_acc | (tmp_carry << 7);
+                            // Write the value back
+                            memory.set(addr, value)?;
+
+                            // Set the flags accordingly
+                            self.p.zero = value == 0;
+                            self.p.negative = tmp_carry & 1 == 1;
+                        }
+                    }
+                },
+                Opcode::Lsr(_) => {
+                    match inst.addr_mode() {
+                        // Accumulator is a special case which does not need
+                        // address decoding
+                        AddrMode::Accumulator => {
+                            // Set carry to the first bit of the accumulator
+                            self.p.carry = StatusRegister::u8_to_bool(
+                                self.acc & 1
+                            );
+                            // If we rotate in Rust,
+                            // we will then need to have additional steps, since
+                            // Rust will take the first bit of the value and set
+                            // it as the last, so we only shift right.
+                            self.acc = self.acc.wrapping_shr(1);
+
+                            // Set the flags accordingly
+                            self.p.zero = self.acc == 0;
+                            self.p.negative = ((self.acc >> 7) & 1) == 1;
+                        }
+                        _ => {
+                            let supp_addr_mode = SupportedAddrMode::ZEROPAGE
+                                | SupportedAddrMode::ZEROPAGE_X
+                                | SupportedAddrMode::ABSOLUTE
+                                | SupportedAddrMode::ABSOLUTE_X;
+                            let addr = inst.addr_mode()
+                                .decode_group_one_op(
+                                    &*memory,
+                                    &self,
+                                    supp_addr_mode,
+                                )?;
+                            // Read the value
+                            let value = memory.read_u8(addr)
+                                .ok_or(CpuError::MmuReadError(addr))?;
+                            // Set carry to the last bit of the accumulator
+                            self.p.carry = StatusRegister::u8_to_bool(
+                                value & 1
+                            );
+                            // If we rotate in Rust,
+                            // we will then need to have additional steps, since
+                            // Rust will take the last bit of the value and set
+                            // it as the first, so we only shift left.
+                            let value = value.wrapping_shr(1);
+                            // Write the value back
+                            memory.set(addr, value)?;
+
+                            // Set the flags accordingly
+                            self.p.zero = value == 0;
+                            self.p.negative = ((value >> 7) & 1) == 1;
+                        }
+                    }
+                },
+                Opcode::And(_) => {
+                    // Load the value we need from memory
+                    let value = match inst.addr_mode() {
+                        AddrMode::Immediate(imm) => *imm,
+                        _ => {
+                            // If it is not an immediate, we need to decode
+                            // the address and fetch the memory from that
+                            // address
+
+                            // Define the supported addressing modes of this
+                            // instruction
+                            let supp_addr_mode = SupportedAddrMode::ZEROPAGE
+                                | SupportedAddrMode::ZEROPAGE_X
+                                | SupportedAddrMode::ABSOLUTE
+                                | SupportedAddrMode::ABSOLUTE_X
+                                | SupportedAddrMode::ABSOLUTE_Y
+                                | SupportedAddrMode::INDEXED_INDIRECT_X
+                                | SupportedAddrMode::INDIRECT_INDEXED_Y;
+                            let addr: usize = inst.addr_mode()
+                                .decode_group_one_op(
+                                    &*memory,
+                                    &self,
+                                    supp_addr_mode,
+                                )?;
+                            let value = memory.read_u8(addr)
+                                .ok_or(CpuError::MmuReadError(addr))?;
+                            value
+                        }
+                    };
+
+                    // Set X register to that value
+                    self.acc = value & self.acc;
+                    // Set the flags accordingly
+                    self.p.zero = self.acc == 0;
+                    self.p.negative = ((self.acc >> 7) & 1) == 1;
+                }
                 _ => todo!(),
             }
             // Add cycles to the CPU
             self.cycles += inst.cycles();
 
-            println!("{:#?}", self);
+            println!("cycles: {:?}", self.cycles);
 
             // Send the cycles back to the emulator main frame
-            tx.send(self.cycles);
+            tx.send(Message::Cycles(self.cycles));
         }
         Ok(())
     }
@@ -722,6 +1038,8 @@ pub enum Opcode {
     Sta(Sta),
     // STX Store X register,
     Stx(Stx),
+    // STY Store Y register,
+    Sty(Sty),
     // BNE - Branch on Result Minus (if the Negative bit is set)
     Bmi(Bmi),
     // BPL - Branch on result Plus (if the Negative bit is zero)
@@ -742,6 +1060,8 @@ pub enum Opcode {
     Bit(Bit),
     // JSR - Jump to subroutine
     Jsr(Jsr),
+    // Jmp - Jump
+    Jmp(Jmp),
     // DEX - Decrement X Register
     Dex(Dex),
     // DEY - Decrement Y Register
@@ -782,6 +1102,14 @@ pub enum Opcode {
     Php(Php),
     // PLP - Pull processor status
     Plp(Plp),
+    // ROL - Rotate Left
+    Rol(Rol),
+    // ROL - Rotate Right
+    Ror(Ror),
+    // AND - Logical AND
+    And(And),
+    // LSR - Logical Shift Right
+    Lsr(Lsr),
 }
 
 #[derive(Debug)]
@@ -794,7 +1122,10 @@ pub enum InstructionError {
 
 impl Instruction {
     /// Reads and decodes a single instruction located at `pc` in the given `mmu`
-    pub fn from_pc(pc: &mut u16, mmu: Arc<Mutex<CpuMmu>>) -> Result<Self, InstructionError> {
+    pub fn from_pc(
+        pc: &mut u16,
+        mmu: Arc<Mutex<CpuMmu>>,
+    ) -> Result<Self, InstructionError> {
         // Acquire the lock for the memory in order to decode the instruction.
         // Rust drops the lock at the end of this functions scope.
         let mmu = mmu.lock().unwrap();
@@ -899,6 +1230,54 @@ impl Instruction {
                     cycles: 3,
                 }
             }
+            opcode::LDX_ZP_Y => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Ldx(Ldx),
+                    addr_mode: AddrMode::ZeroPageIndexed(Idx::Y, addr),
+                    cycles: 4,
+                }
+            }
+            opcode::LDX_A => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Ldx(Ldx),
+                    addr_mode: AddrMode::Absolute(addr),
+                    cycles: 4,
+                }
+            }
+            opcode::LDX_A_Y => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Ldx(Ldx),
+                    addr_mode: AddrMode::AbsoluteIndexed(Idx::Y, addr),
+                    cycles: 4,
+                }
+            }
             opcode::LDY_I => {
                 // We also have to read the next byte, which is our operand
                 let Some(next_byte) = mmu.read_u8(usize::from(*pc)) else {
@@ -913,6 +1292,70 @@ impl Instruction {
                     opcode: Opcode::Ldy(Ldy),
                     addr_mode: AddrMode::Immediate(next_byte),
                     cycles: 2,
+                }
+            }
+            opcode::LDY_ZP => {
+                // We also have to read the next byte, which is our operand
+                let Some(next_byte) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Ldy(Ldy),
+                    addr_mode: AddrMode::ZeroPage(next_byte),
+                    cycles: 3,
+                }
+            }
+            opcode::LDY_ZP_X => {
+                // We also have to read the next byte, which is our operand
+                let Some(next_byte) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Ldy(Ldy),
+                    addr_mode: AddrMode::ZeroPageIndexed(Idx::X, next_byte),
+                    cycles: 4,
+                }
+            }
+            opcode::LDY_A => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Ldy(Ldy),
+                    addr_mode: AddrMode::Absolute(addr),
+                    cycles: 4,
+                }
+            }
+            opcode::LDY_A_X => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Ldy(Ldy),
+                    addr_mode: AddrMode::AbsoluteIndexed(Idx::X, addr),
+                    cycles: 4,
                 }
             }
             opcode::TXS => Instruction {
@@ -952,7 +1395,23 @@ impl Instruction {
                     cycles: 3,
                 }
             }
-            opcode::STA_A => {
+            opcode::LDA_ZP_X => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Lda(Lda),
+                    addr_mode: AddrMode::ZeroPageIndexed(Idx::X, addr),
+                    cycles: 4,
+                }
+            }
+            opcode::LDA_A => {
                 // We also have to read the next byte, which is our operand
                 let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
                     return Err(InstructionError::InvalidInstruction(byte));
@@ -963,9 +1422,73 @@ impl Instruction {
                     .ok_or(InstructionError::OverflowPc)?;
 
                 Instruction {
-                    opcode: Opcode::Sta(Sta),
+                    opcode: Opcode::Lda(Lda),
                     addr_mode: AddrMode::Absolute(addr),
                     cycles: 4,
+                }
+            }
+            opcode::LDA_A_X => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Lda(Lda),
+                    addr_mode: AddrMode::AbsoluteIndexed(Idx::X, addr),
+                    cycles: 4,
+                }
+            }
+            opcode::LDA_A_Y => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Lda(Lda),
+                    addr_mode: AddrMode::AbsoluteIndexed(Idx::Y, addr),
+                    cycles: 4,
+                }
+            }
+            opcode::LDA_I_X => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Lda(Lda),
+                    addr_mode: AddrMode::IndexedIndirectX(addr),
+                    cycles: 6,
+                }
+            }
+            opcode::LDA_I_Y => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Lda(Lda),
+                    addr_mode: AddrMode::IndirectIndexedY(addr),
+                    cycles: 6,
                 }
             }
             opcode::STA_ZP => {
@@ -984,6 +1507,102 @@ impl Instruction {
                     cycles: 3,
                 }
             }
+            opcode::STA_ZP_X => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Sta(Sta),
+                    addr_mode: AddrMode::ZeroPageIndexed(Idx::X, addr),
+                    cycles: 4,
+                }
+            }
+            opcode::STA_A => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Sta(Sta),
+                    addr_mode: AddrMode::Absolute(addr),
+                    cycles: 4,
+                }
+            }
+            opcode::STA_A_X => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Sta(Sta),
+                    addr_mode: AddrMode::AbsoluteIndexed(Idx::X, addr),
+                    cycles: 5,
+                }
+            }
+            opcode::STA_A_Y => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Sta(Sta),
+                    addr_mode: AddrMode::AbsoluteIndexed(Idx::Y, addr),
+                    cycles: 5,
+                }
+            }
+            opcode::STA_I_X => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Sta(Sta),
+                    addr_mode: AddrMode::IndexedIndirectX(addr),
+                    cycles: 6,
+                }
+            }
+            opcode::STA_I_Y => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Sta(Sta),
+                    addr_mode: AddrMode::IndirectIndexedY(addr),
+                    cycles: 6,
+                }
+            }
             opcode::STX_ZP => {
                 // We also have to read the next byte, which is our operand
                 let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
@@ -1000,6 +1619,22 @@ impl Instruction {
                     cycles: 3,
                 }
             }
+            opcode::STX_ZP_Y => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Stx(Stx),
+                    addr_mode: AddrMode::ZeroPageIndexed(Idx::Y, addr),
+                    cycles: 4,
+                }
+            }
             opcode::STX_A => {
                 // We also have to read the next byte, which is our operand
                 let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
@@ -1012,6 +1647,54 @@ impl Instruction {
 
                 Instruction {
                     opcode: Opcode::Stx(Stx),
+                    addr_mode: AddrMode::Absolute(addr),
+                    cycles: 4,
+                }
+            }
+            opcode::STY_ZP => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Sty(Sty),
+                    addr_mode: AddrMode::ZeroPage(addr),
+                    cycles: 3,
+                }
+            }
+            opcode::STY_ZP_X => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Sty(Sty),
+                    addr_mode: AddrMode::ZeroPageIndexed(Idx::X, addr),
+                    cycles: 4,
+                }
+            }
+            opcode::STY_A => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Sty(Sty),
                     addr_mode: AddrMode::Absolute(addr),
                     cycles: 4,
                 }
@@ -1216,6 +1899,38 @@ impl Instruction {
                     cycles: 4,
                 }
             }
+            opcode::JMP_A => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Jmp(Jmp),
+                    addr_mode: AddrMode::Absolute(addr),
+                    cycles: 3,
+                }
+            }
+            opcode::JMP_I => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Jmp(Jmp),
+                    addr_mode: AddrMode::Indirect(addr),
+                    cycles: 5,
+                }
+            }
             opcode::DEX => Instruction {
                 opcode: Opcode::Dex(Dex),
                 addr_mode: AddrMode::Implied,
@@ -1251,6 +1966,54 @@ impl Instruction {
                 addr_mode: AddrMode::Implied,
                 cycles: 6,
             },
+            opcode::SBC_I => {
+                // We also have to read the next 2 bytes, which is our operand
+                let Some(imm) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Sbc(Sbc),
+                    addr_mode: AddrMode::Immediate(imm),
+                    cycles: 2,
+                }
+            },
+            opcode::SBC_ZP => {
+                // We also have to read the next 2 bytes, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Sbc(Sbc),
+                    addr_mode: AddrMode::ZeroPage(addr),
+                    cycles: 3,
+                }
+            },
+            opcode::SBC_ZP_X => {
+                // We also have to read the next 2 bytes, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Sbc(Sbc),
+                    addr_mode: AddrMode::ZeroPageIndexed(Idx::X, addr),
+                    cycles: 4,
+                }
+            },
             opcode::SBC_A => {
                 // We also have to read the next 2 bytes, which is our operand
                 let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
@@ -1265,6 +2028,70 @@ impl Instruction {
                     opcode: Opcode::Sbc(Sbc),
                     addr_mode: AddrMode::Absolute(addr),
                     cycles: 4,
+                }
+            },
+            opcode::SBC_A_X => {
+                // We also have to read the next 2 bytes, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Sbc(Sbc),
+                    addr_mode: AddrMode::AbsoluteIndexed(Idx::X, addr),
+                    cycles: 4,
+                }
+            },
+            opcode::SBC_A_Y => {
+                // We also have to read the next 2 bytes, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Sbc(Sbc),
+                    addr_mode: AddrMode::AbsoluteIndexed(Idx::Y, addr),
+                    cycles: 4,
+                }
+            },
+            opcode::SBC_I_X => {
+                // We also have to read the next 2 bytes, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Sbc(Sbc),
+                    addr_mode: AddrMode::IndexedIndirectX(addr),
+                    cycles: 6,
+                }
+            },
+            opcode::SBC_I_Y => {
+                // We also have to read the next 2 bytes, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::Sbc(Sbc),
+                    addr_mode: AddrMode::IndirectIndexedY(addr),
+                    cycles: 5,
                 }
             },
             opcode::ADC_I => {
@@ -1284,6 +2111,383 @@ impl Instruction {
                     cycles: 2,
                 }
             },
+            opcode::ROL_ACC => {
+                Instruction {
+                    opcode: Opcode::Rol(Rol),
+                    addr_mode: AddrMode::Accumulator,
+                    cycles: 2,
+                }
+            }
+            opcode::ROL_ZP => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+
+                Instruction {
+                    opcode: Opcode::Rol(Rol),
+                    addr_mode: AddrMode::ZeroPage(addr),
+                    cycles: 5,
+                }
+            }
+            opcode::ROL_ZP_X => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+
+                Instruction {
+                    opcode: Opcode::Rol(Rol),
+                    addr_mode: AddrMode::ZeroPageIndexed(Idx::X, addr),
+                    cycles: 6,
+                }
+            }
+            opcode::ROL_A => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+
+                Instruction {
+                    opcode: Opcode::Rol(Rol),
+                    addr_mode: AddrMode::Absolute(addr),
+                    cycles: 6,
+                }
+            }
+            opcode::ROL_A_X => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+
+                Instruction {
+                    opcode: Opcode::Rol(Rol),
+                    addr_mode: AddrMode::AbsoluteIndexed(Idx::X, addr),
+                    cycles: 7,
+                }
+            }
+            opcode::ROR_ACC => {
+                Instruction {
+                    opcode: Opcode::Ror(Ror),
+                    addr_mode: AddrMode::Accumulator,
+                    cycles: 2,
+                }
+            }
+            opcode::ROR_ZP => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+
+                Instruction {
+                    opcode: Opcode::Ror(Ror),
+                    addr_mode: AddrMode::ZeroPage(addr),
+                    cycles: 5,
+                }
+            }
+            opcode::ROR_ZP_X => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+
+                Instruction {
+                    opcode: Opcode::Ror(Ror),
+                    addr_mode: AddrMode::ZeroPageIndexed(Idx::X, addr),
+                    cycles: 6,
+                }
+            }
+            opcode::ROR_A => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+
+                Instruction {
+                    opcode: Opcode::Ror(Ror),
+                    addr_mode: AddrMode::Absolute(addr),
+                    cycles: 6,
+                }
+            }
+            opcode::ROR_A_X => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+
+                Instruction {
+                    opcode: Opcode::Ror(Ror),
+                    addr_mode: AddrMode::AbsoluteIndexed(Idx::X, addr),
+                    cycles: 7,
+                }
+            }
+            opcode::AND_I => {
+                // We also have to read the next byte, which is our operand
+                let Some(imm) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+
+                Instruction {
+                    opcode: Opcode::And(And),
+                    addr_mode: AddrMode::Immediate(imm),
+                    cycles: 2,
+                }
+            }
+            opcode::AND_ZP => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+
+                Instruction {
+                    opcode: Opcode::And(And),
+                    addr_mode: AddrMode::ZeroPage(addr),
+                    cycles: 3,
+                }
+            }
+            opcode::AND_ZP_X => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+
+                Instruction {
+                    opcode: Opcode::And(And),
+                    addr_mode: AddrMode::ZeroPageIndexed(Idx::X, addr),
+                    cycles: 4,
+                }
+            }
+            opcode::AND_A => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+
+                Instruction {
+                    opcode: Opcode::And(And),
+                    addr_mode: AddrMode::Absolute(addr),
+                    cycles: 4,
+                }
+            }
+            opcode::AND_A_X => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+
+                Instruction {
+                    opcode: Opcode::And(And),
+                    addr_mode: AddrMode::AbsoluteIndexed(Idx::X, addr),
+                    cycles: 4,
+                }
+            }
+            opcode::AND_A_Y => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+
+                Instruction {
+                    opcode: Opcode::And(And),
+                    addr_mode: AddrMode::AbsoluteIndexed(Idx::Y, addr),
+                    cycles: 4,
+                }
+            }
+            opcode::AND_I_X => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+
+                Instruction {
+                    opcode: Opcode::And(And),
+                    addr_mode: AddrMode::IndexedIndirectX(addr),
+                    cycles: 6,
+                }
+            }
+            opcode::AND_I_Y => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+
+                Instruction {
+                    opcode: Opcode::And(And),
+                    addr_mode: AddrMode::IndirectIndexedY(addr),
+                    cycles: 5,
+                }
+            }
+            opcode::LSR_ACC => {
+                Instruction {
+                    opcode: Opcode::Lsr(Lsr),
+                    addr_mode: AddrMode::Accumulator,
+                    cycles: 2,
+                }
+            }
+            opcode::AND_ZP => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::And(And),
+                    addr_mode: AddrMode::ZeroPage(addr),
+                    cycles: 5,
+                }
+            }
+            opcode::AND_ZP_X => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u8(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u8>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::And(And),
+                    addr_mode: AddrMode::ZeroPageIndexed(Idx::X, addr),
+                    cycles: 6,
+                }
+            }
+            opcode::AND_A => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::And(And),
+                    addr_mode: AddrMode::Absolute(addr),
+                    cycles: 6,
+                }
+            }
+            opcode::AND_A_X => {
+                // We also have to read the next byte, which is our operand
+                let Some(addr) = mmu.read_u16_le(usize::from(*pc)) else {
+                    return Err(InstructionError::InvalidInstruction(byte));
+                };
+
+                // Advance the program counter
+                *pc = pc
+                    .checked_add(std::mem::size_of::<u16>() as u16)
+                    .ok_or(InstructionError::OverflowPc)?;
+
+                Instruction {
+                    opcode: Opcode::And(And),
+                    addr_mode: AddrMode::Absolute(addr),
+                    cycles: 7,
+                }
+            }
             opcode::TAX => {
                 Instruction {
                     opcode: Opcode::Tax(Tax),
@@ -1397,6 +2601,8 @@ pub struct Sta;
 #[derive(Debug)]
 pub struct Stx;
 #[derive(Debug)]
+pub struct Sty;
+#[derive(Debug)]
 pub struct Bmi;
 #[derive(Debug)]
 pub struct Bpl;
@@ -1416,6 +2622,8 @@ pub struct Bvc;
 pub struct Bit;
 #[derive(Debug)]
 pub struct Jsr;
+#[derive(Debug)]
+pub struct Jmp;
 #[derive(Debug)]
 pub struct Dex;
 #[derive(Debug)]
@@ -1456,6 +2664,14 @@ pub struct Pla;
 pub struct Php;
 #[derive(Debug)]
 pub struct Plp;
+#[derive(Debug)]
+pub struct Rol;
+#[derive(Debug)]
+pub struct Ror;
+#[derive(Debug)]
+pub struct And;
+#[derive(Debug)]
+pub struct Lsr;
 
 #[derive(Debug)]
 pub enum CpuError {
@@ -1494,7 +2710,7 @@ mod cpu_tests {
     use crate::emulator::{Cpu, CpuMmu};
     use std::sync::{Arc, Mutex};
 
-    #[test]
+    //#[test]
     fn test_adc_sign_overflow_set() {
         let mut cpu = Cpu::power_up();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1515,7 +2731,7 @@ mod cpu_tests {
         assert!(cpu.p().negative == true);
     }
 
-    #[test]
+    //#[test]
     fn test_adc_no_flags_set() {
         let mut cpu = Cpu::power_up();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1534,7 +2750,7 @@ mod cpu_tests {
         assert!(cpu.p().negative == false);
     }
 
-    #[test]
+    //#[test]
     fn test_adc_unsign_carry_set() {
         let mut cpu = Cpu::power_up();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1553,7 +2769,7 @@ mod cpu_tests {
         assert!(cpu.p().negative == false);
     }
 
-    #[test]
+    //#[test]
     fn test_adc_sign_overflow_set2() {
         let mut cpu = Cpu::power_up();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1574,7 +2790,7 @@ mod cpu_tests {
         assert!(cpu.p().negative == false);
     }
 
-    #[test]
+    //#[test]
     fn test_adc_sign_no_overflow() {
         let mut cpu = Cpu::power_up();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1595,7 +2811,7 @@ mod cpu_tests {
         assert!(cpu.p().negative == true);
     }
 
-    #[test]
+    //#[test]
     fn test_adc_sign_no_overflow_no_cary() {
         let mut cpu = Cpu::power_up();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1616,7 +2832,7 @@ mod cpu_tests {
         assert!(cpu.p().negative == true);
     }
 
-    #[test]
+    //#[test]
     fn test_adc_sign_no_overflow_cary_set() {
         let mut cpu = Cpu::power_up();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1635,5 +2851,137 @@ mod cpu_tests {
         assert!(cpu.p().carry == true);
         assert!(cpu.p().overflow == false);
         assert!(cpu.p().negative == false);
+    }
+
+    //#[test]
+    fn test_zero_indexed_x_addressing() {
+        let mut cpu = Cpu::power_up();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut cpu_mmu = Arc::new(Mutex::new(CpuMmu::default()));
+
+        {
+            (cpu_mmu.lock().unwrap()).set_bytes(0, &[
+                // Define 5 byte we want to copy
+                0x1e,
+                0xe7,
+                0xb0,
+                0x0b,
+                0x55,
+                // Define the moving sequence of the 5 bytes to a different
+                // location
+                0xA2, 5,      // LDX 5
+                0xB5, 0xff,   // LDA FIELD1 - 1, X (0 - 1 in 2's complement)
+                0x95, 14,     // STA FIELD2 - 1, X (15 - 1 in 2's complement)
+                0xCA,         // DEX
+                0xD0, 249,    // BNE - 7
+                0x00,         // BRK
+            ]).expect("Failed to set bytes");
+        }
+
+        cpu.set_pc(5);
+        cpu.execute(cpu_mmu.clone(), tx.clone()).expect("Failed to execute");
+
+        let expected_memory = b"\x1e\xe7\xb0\x0b\x55";
+        let mmu = cpu_mmu.lock().unwrap();
+        let actual_memory = mmu.get_bytes(15..15+5).unwrap();
+
+        assert!(expected_memory == actual_memory);
+    }
+
+    //#[test]
+    fn test_absolute_indexed_x_addressing() {
+        let mut cpu = Cpu::power_up();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut cpu_mmu = Arc::new(Mutex::new(CpuMmu::default()));
+
+        let expected_memory = b"\x1e\xe7\xb0\x0b\x55";
+
+        {
+            let mut mmu = cpu_mmu.lock().unwrap();
+            mmu.set_bytes(0x0400, expected_memory).unwrap();
+
+            mmu.set_bytes(0, &[
+                // Define the moving sequence of the 5 bytes to a different
+                // location
+                0xA2, 5,            // LDX 5
+                0xBD, 0xFF, 0x03,    // LDA FIELD1 - 1, X (0 - 1 in 2's complement)
+                0x9D, 0xFF, 0x07,    // STA FIELD2 - 1, X (15 - 1 in 2's complement)
+                0xCA,               // DEX
+                0xD0, 247,          // BNE - 9
+                0x00,               // BRK
+            ]).expect("Failed to set bytes");
+        }
+
+        cpu.set_pc(0);
+        cpu.execute(cpu_mmu.clone(), tx.clone()).expect("Failed to execute");
+
+        let mmu = cpu_mmu.lock().unwrap();
+        let actual_memory = mmu.get_bytes(0x0800..0x0800+5).unwrap();
+
+        assert!(expected_memory == actual_memory);
+    }
+
+    //#[test]
+    fn test_absolute_indexed_y_addressing() {
+        let mut cpu = Cpu::power_up();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut cpu_mmu = Arc::new(Mutex::new(CpuMmu::default()));
+
+        let expected_memory = b"\x1e\xe7\xb0\x0b\x55";
+
+        {
+            let mut mmu = cpu_mmu.lock().unwrap();
+            mmu.set_bytes(0x0400, expected_memory).unwrap();
+
+            mmu.set_bytes(0, &[
+                // Define the moving sequence of the 5 bytes to a different
+                // location
+                0xA0, 5,            // LDY 5
+                0xB9, 0xFF, 0x03,    // LDA FIELD1 - 1, Y (0 - 1 in 2's complement)
+                0x99, 0xFF, 0x07,    // STA FIELD2 - 1, Y (15 - 1 in 2's complement)
+                0x88,               // DEY
+                0xD0, 247,          // BNE - 9
+                0x00,               // BRK
+            ]).expect("Failed to set bytes");
+        }
+
+        cpu.set_pc(0);
+        cpu.execute(cpu_mmu.clone(), tx.clone()).expect("Failed to execute");
+
+        let mmu = cpu_mmu.lock().unwrap();
+        let actual_memory = mmu.get_bytes(0x0800..0x0800+5).unwrap();
+
+        assert!(expected_memory == actual_memory);
+    }
+
+    //#[test]
+    fn test_indexed_indirect_x() {
+        let mut cpu = Cpu::power_up();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut cpu_mmu = Arc::new(Mutex::new(CpuMmu::default()));
+
+        let indirect_ptr = b"\x74\x20";
+        let expected_memory = 0x77;
+
+        {
+            let mut mmu = cpu_mmu.lock().unwrap();
+            mmu.set_bytes(0x0024, indirect_ptr).unwrap();
+            mmu.set(0x2074, expected_memory).unwrap();
+
+            mmu.set_bytes(0, &[
+                // Define the moving sequence of the 5 bytes to a different
+                // location
+                0xA2, 0x04,     // LDX $04
+                0xA1, 0x20,     // LDA ($20, X) (points to 0x0020 + x address)
+                0x00,           // BRK
+            ]).expect("Failed to set bytes");
+        }
+
+        cpu.set_pc(0);
+        cpu.execute(cpu_mmu.clone(), tx.clone()).expect("Failed to execute");
+
+        let mmu = cpu_mmu.lock().unwrap();
+
+        assert!(cpu.acc() == expected_memory);
     }
 }

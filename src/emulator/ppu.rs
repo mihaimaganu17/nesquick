@@ -2,6 +2,24 @@
 use crate::emulator::{CpuMmu, CpuMmuError};
 use std::sync::{Arc, Mutex};
 
+pub const PPU_CTRL_CPU_MMU_ADDR: usize = 0x2000;
+pub const PPU_MASK_CPU_MMU_ADDR: usize = 0x2001;
+pub const PPU_STATUS_CPU_MMU_ADDR: usize = 0x2002;
+pub const PPU_OAMADDR_CPU_MMU_ADDR: usize = 0x2003;
+pub const PPU_OAMDATA_CPU_MMU_ADDR: usize = 0x2004;
+pub const PPU_SCROLL_CPU_MMU_ADDR: usize = 0x2005;
+pub const PPU_ADDR_CPU_MMU_ADDR: usize = 0x2006;
+pub const PPU_DATA_CPU_MMU_ADDR: usize = 0x2007;
+pub const PPU_OAMDMA_CPU_MMU_ADDR: usize = 0x2007;
+
+#[derive(Debug)]
+pub enum PpuEffect {
+    PpuStatusRead,
+    PpuStatusWrite,
+    PpuAddrRead,
+    PpuAddrWrite,
+}
+
 // Trait that needs to be implemented by a register that is memory mapped
 // This is usually needed by registers used to communicate between the CPU
 // and the PPU of the NES. This trait and its methods are not public since some
@@ -27,7 +45,7 @@ const PPU_REGS_MIRROR_END_ADDR: u16 = 0x4000;
 /// PPU controller register. Access: write
 /// Contains various flags controlling PPU operation.
 #[derive(Debug)]
-pub struct PpuCtrl {
+struct PpuCtrl {
     // Base nametable address
     // (0 = $2000; 1 = $2400; 2 = $2800; 3 = $2C00)
     base_nt_addr: u16,
@@ -88,7 +106,7 @@ impl From<u8> for PpuCtrl {
 
 /// VRAM address increment per CPU read/write
 #[derive(Debug)]
-pub enum VramInc {
+enum VramInc {
     // Add 1, going across
     Add1X,
     // Add 32, going down
@@ -146,7 +164,7 @@ impl SpriteSize {
 /// This register controls the rendering of sprites and backgrounds, as well
 /// as colour effects.
 #[derive(Debug)]
-pub struct PpuMask;
+struct PpuMask;
 
 // Macro that implements the trait `MemoryMappedReg` for memory mapped PPU
 // registers in the CPU's memory.
@@ -243,6 +261,11 @@ pub struct Ppu {
     ppu_ctrl: PpuCtrl,
     ppu_mask: PpuMask,
     ppu_status: PpuStatus,
+    // Folowing are the 4 PPU internal registers
+    v_reg: VReg,
+    t_reg: TReg,
+    x_reg: XReg,
+    w_reg: WReg,
 }
 
 impl Ppu {
@@ -261,6 +284,10 @@ impl Ppu {
            ppu_ctrl,
            ppu_mask,
            ppu_status,
+           v_reg: VReg(0),
+           t_reg: TReg(0),
+           x_reg: XReg(0),
+           w_reg: WReg(0),
         }
     }
 
@@ -273,7 +300,41 @@ impl Ppu {
         // Set vblank flag
         self.ppu_status.set_vblank(&mut *cpu_mmu)
     }
+
+    /// PPU sprite evaluation is an operation done by the PPU once each
+    /// scanline. It prepares the set of sprites and fetches their data to be
+    /// rendered on the next scanline. This is a separate step from sprite
+    /// rendering.
+    /// https://www.nesdev.org/wiki/PPU_sprite_evaluation
+    /// Each scanline, the PPU reads the spritelist
+    /// (that is, Object Attribute Memory) to see which
+    /// to draw:
+    ///     1. First, it clears the list of sprites to draw.
+    ///     2. Second, it reads through OAM, checking which sprites will be on
+    ///     this scanline. It chooses the first eight it finds that do.
+    ///     3. Third, if eight sprites were found, it checks (in a
+    ///     wrongly-implemented fashion) for further sprites on the scanline to
+    ///     see if the sprite overflow flag should be set.
+    ///     4. Fourth, using the details for the eight (or fewer) sprites
+    ///     chosen, it determines which pixels each has on the scanline and
+    ///     where to draw them.
+    pub fn sprite_eval() -> Option<()> {
+        Some(())
+    }
 }
+
+#[derive(Debug, Default)]
+pub struct VReg(u8);
+#[derive(Debug, Default)]
+pub struct TReg(u8);
+#[derive(Debug, Default)]
+pub struct XReg(u8);
+/// Denotes the first or second write toggle. Toggles on each write to either
+/// PPUSCROLL or PPUADDR, indicating whether this is the first or second write.
+/// Clears on reads of PPUSTATUS. Sometimes called the 'write latch' or
+/// 'write toggle'.
+#[derive(Debug, Default)]
+pub struct WReg(u8);
 
 #[cfg(test)]
 mod tests {

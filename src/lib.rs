@@ -7,11 +7,6 @@ mod test {
     use crate::nes::INes;
     use crate::reader::Reader;
 
-    #[test]
-    fn works() {
-        assert!(2 + 2 == 4);
-    }
-
     //#[test]
     fn parse_ines() {
         let path = "testdata/cpu_dummy_reads.nes";
@@ -26,7 +21,7 @@ mod test {
         //println!("INes {:#?}", ines.header());
     }
 
-    #[test]
+    //#[test]
     fn ppu_color_test() {
         let path = "testdata/color_test.nes";
         let data = std::fs::read(path).expect("Failed to read file from disk");

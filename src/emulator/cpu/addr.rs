@@ -1,6 +1,6 @@
 //! Module that defines, manipulates and encodes addressing modes
 use bitflags::bitflags;
-use crate::emulator::{Cpu, CpuMmu, CpuError};
+use crate::emulator::{Cpu, CpuMmu};
 
 /// When the CPU fetches an opcode, besides decoding the assembly instruction,
 /// it will also decode and addressing mode that will determine the number
@@ -13,6 +13,10 @@ pub enum AddrMode {
     // 'Clear Carry Flag' (CLC) and 'Return from Subroutine' (RTS) are
     // implicit.
     Implied,
+    // Some instructions have an option to operate directly upon the
+    // accumulator. The programmer
+    // specifies this by using a special operand value, 'A'.
+    Accumulator,
     // Immediate addressing allows the programmer to directly specify an 8 bit
     // constant within the instruction. It is indicated by a '#' symbol
     // followed by an numeric expression.
@@ -25,6 +29,15 @@ pub enum AddrMode {
     // Absolute indexed address is absolute addressing with an index
     // register added to the absolute address.
     AbsoluteIndexed(Idx, u16),
+    // JMP is the only 6502 instruction to support indirection. The instruction
+    // contains a 16 bit address which identifies the location of the least
+    // significant byte of another 16 bit memory address which is the real
+    // target of the instruction.
+    //
+    // For example if location $0120 contains $FC and location $0121 contains
+    // BA then the instruction JMP ($0120) will cause the next instruction
+    // execution to occur at $BAFC (e.g. the contents of $0120 and $0121).
+    Indirect(u16),
     // An instruction using zero page addressing mode has only an 8 bit address
     // operand. This limits it to addressing only the first 256 bytes of memory
     // (e.g. $0000 to $00FF) where the most significant byte of the address is
@@ -96,6 +109,12 @@ impl AddrMode {
             AddrMode::Immediate(_) => {
                 return Err(AddrModeError::ImmediateAlreadyDecoded);
             }
+            AddrMode::Accumulator => {
+                return Err(AddrModeError::AccumulatorAlreadyDecoded);
+            }
+            AddrMode::Indirect(_) => {
+                return Err(AddrModeError::IndirectAlreadyDecoded);
+            }
             AddrMode::Absolute(addr) => {
                 if (supp_addr_mode & SupportedAddrMode::ABSOLUTE).bits() != 0 {
                     *addr as usize
@@ -132,14 +151,14 @@ impl AddrMode {
             AddrMode::ZeroPageIndexed(idx, addr) => {
                 match idx {
                     Idx::X => {
-                        if (supp_addr_mode & SupportedAddrMode::ABSOLUTE_X).bits() != 0{
+                        if (supp_addr_mode & SupportedAddrMode::ZEROPAGE_X).bits() != 0{
                             (addr.wrapping_add(cpu.x)) as usize
                         } else {
                             unreachable!()
                         }
                     }
                     Idx::Y => {
-                        if (supp_addr_mode & SupportedAddrMode::ABSOLUTE_Y).bits() != 0{
+                        if (supp_addr_mode & SupportedAddrMode::ZEROPAGE_Y).bits() != 0{
                             (addr.wrapping_add(cpu.y)) as usize
                         } else {
                             unreachable!()
@@ -208,6 +227,8 @@ pub enum AddrModeError {
     ImpliedAlreadyDecoded,
     RelativeAlreadyDecoded,
     ImmediateAlreadyDecoded,
+    IndirectAlreadyDecoded,
+    AccumulatorAlreadyDecoded,
 }
 
 #[derive(Debug)]
