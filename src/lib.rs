@@ -1,6 +1,6 @@
-mod emulator;
-mod nes;
-mod reader;
+pub mod emulator;
+pub mod nes;
+pub mod reader;
 
 #[cfg(test)]
 mod test {

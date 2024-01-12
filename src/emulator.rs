@@ -1,6 +1,7 @@
 mod cpu;
 mod mmu;
 mod ppu;
+mod io;
 
 use crate::nes::INes;
 use cpu::{Cpu, CpuError};
@@ -10,6 +11,7 @@ use std::{
     sync::{Arc, Mutex, mpsc},
     thread,
 };
+use io::{LivingRoomTV, LivingRoomTVError};
 
 pub struct Emulator {
     cpu: Cpu,
@@ -58,25 +60,42 @@ impl Emulator {
             // Get the bytes of the pattern table
             let pattern_table = ppu_mmu.pattern_table(0).unwrap();
 
+            let mut lr_tv = LivingRoomTV::init().unwrap();
+            let mut tile_data = Vec::with_capacity(8*8*3);
+            let mut x = 0;
+            let mut y = 0;
             for tile_idx in 0..(0x1000/16) {
                 let start = tile_idx * 16;
                 let end = (tile_idx + 1) * 16;
-                println!("Start Of Tile: {start} -> {end}");
+                tile_data.clear();
+                //println!("Start Of Tile: {start} -> {end}");
                 for pos in start..(end-8) {
                     let plane_0_byte = pattern_table[pos];
                     let plane_1_byte = pattern_table[pos + 8];
-                    for bit in (1..8).rev() {
+                    for bit in (0..8).rev() {
                         let res = (plane_0_byte >> bit) & 1
                             | ((plane_1_byte >> bit) & 1) << 1;
-                        print!("{:02b}", res);
+                        if res != 0 {
+                            tile_data.push(0xFF);
+                            tile_data.push(0xA5);
+                            tile_data.push(0xFF);
+                        } else {
+                            tile_data.push(0x00);
+                            tile_data.push(0x00);
+                            tile_data.push(0x00);
+                        }
                     }
-                    println!();
-                    //let pixel = pattern_table[plane_0_byte] 
-                    //print!("{:08b}", pattern_table[pixel_byte]);
                 }
 
-                println!("End Of Tile");
+                x += 8;
+
+                if x == 256 {
+                    x = 0;
+                    y += 8;
+                }
+                lr_tv.add_texture(&tile_data, x, y, 8, 8).unwrap();
             }
+            lr_tv.render_frame()?;
         }
 
         Ok(())
@@ -179,6 +198,7 @@ pub enum EmulatorError {
     CpuMmuError(CpuMmuError),
     PpuMmuError(PpuMmuError),
     CannotReadEntrypoint,
+    LivingRoomTVError(LivingRoomTVError),
 }
 
 impl From<CpuMmuError> for EmulatorError {
@@ -199,6 +219,12 @@ impl From<CpuError> for EmulatorError {
     }
 }
 
+impl From<LivingRoomTVError> for EmulatorError {
+    fn from(err: LivingRoomTVError) -> Self {
+        Self::LivingRoomTVError(err)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use crate::emulator::Emulator;
@@ -207,7 +233,7 @@ mod test {
 
     #[test]
     fn emu_cpu_mmu() {
-        let path = "testdata/cpu_dummy_reads.nes";
+        let path = "/Users/ace/magic/nesquick/testdata/cpu_dummy_reads.nes";
         let data = std::fs::read(path).expect("Failed to read file from disk");
         let mut reader = Reader::new(data);
         let ines = INes::parse(&mut reader).expect("Failed to parse INes");

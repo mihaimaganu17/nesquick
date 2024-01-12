@@ -1,4 +1,10 @@
-# Big question: What system do we want to emulate?
+# Requirements
+Have SDL2 Installed.
+
+## macOS
+```
+brew install sdl2
+```
 
 # NES
 ## General information
