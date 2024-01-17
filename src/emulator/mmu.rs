@@ -53,7 +53,7 @@ impl CpuMmu {
         // Set that specific range with the given bytes
         self.data
             .get_mut(range.clone())
-            .ok_or(CpuMmuError::OutOfBoundsAccess(range))?
+            .ok_or(CpuMmuError::OutOfBoundsAccess(range.clone()))?
             .clone_from_slice(bytes);
 
         // If the size of the bytes is only 16KB, or even less(which should not
@@ -74,6 +74,9 @@ impl CpuMmu {
             // potential other effects
             match offset {
                 ppu::PPU_ADDR_CPU_MMU_ADDR => {
+                    let data = self.data
+                        .get(range.clone());
+                    println!("[Debug] bytes {:?}, data {:?}", bytes, data);
                     NesEffect::Ppu(ppu::PpuEffect::PpuAddrWrite)
                 }
                 _ => NesEffect::None
@@ -114,8 +117,17 @@ impl CpuMmu {
     }
 
     /// Read a byte at the specified `addr`
-    pub fn read_u8(&self, addr: usize) -> Option<u8> {
-        self.data.get(addr).copied()
+    pub fn read_u8(&self, addr: usize) -> Result<(u8, NesEffect), CpuMmuError> {
+        let nes_effect = match addr {
+            ppu::PPU_STATUS_CPU_MMU_ADDR => {
+                NesEffect::Ppu(ppu::PpuEffect::PpuStatusRead)
+            }
+            _ => NesEffect::None,
+        };
+        let value = self.data.get(addr)
+            .ok_or(CpuMmuError::OutOfBoundsAccess(addr..addr+1))?;
+
+        Ok((*value, nes_effect))
     }
 
     /// Set a single byte to the desired location
@@ -137,6 +149,7 @@ impl CpuMmu {
 pub enum CpuMmuError {
     OutOfBoundsAccess(Range<usize>),
     FailedToGetPpuStatus,
+    FailedToGetPpuAddr,
 }
 
 // The PPU addresses a 14-bit (16kB) address space, $0000-3FFF,

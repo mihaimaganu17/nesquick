@@ -1,4 +1,4 @@
-use nesquick::{reader::Reader, nes::INes, emulator::Emulator};
+use nesquick::{reader::Reader, nes::INes, emulator::Emulator, emulator::LivingRoomTV};
 use std::time::Duration;
 
 fn main() {
@@ -8,5 +8,8 @@ fn main() {
     let ines = INes::parse(&mut reader).expect("Failed to parse INes");
 
     let mut emu = Emulator::new();
-    emu.load_nes(ines).expect("Failed to load file in Emulator");
+
+    let mut lr_tv = LivingRoomTV::init()
+        .expect("Failed to install Living Room TV");
+    emu.load_nes(ines, Some(&mut lr_tv)).expect("Failed to load file in Emulator");
 }

@@ -30,7 +30,7 @@ trait MemoryMappedReg {
     const CPU_ADDR: u16;
 
     /// Get method to get the register from the specified `mmu` memory unit
-    fn get(&self, cpu_mmu: &CpuMmu) -> Option<u8>;
+    fn get(&self, cpu_mmu: &mut CpuMmu) -> Option<u8>;
 
     /// Get method to get the register from the specified memmory unit.
     fn set(&self, cpu_mmu: &mut CpuMmu, value: u8) -> Result<(), CpuMmuError>;
@@ -173,8 +173,11 @@ macro_rules! memory_map_ppu_reg {
         impl MemoryMappedReg for $reg {
             const CPU_ADDR: u16 = $addr;
 
-            fn get(&self, cpu_mmu: &CpuMmu) -> Option<u8> {
-                cpu_mmu.read_u8(Self::CPU_ADDR as usize)
+            fn get(&self, cpu_mmu: &mut CpuMmu) -> Option<u8> {
+                let (value, _nes_effect) = cpu_mmu
+                    .read_u8(Self::CPU_ADDR as usize)
+                    .ok()?;
+                Some(value)
             }
 
             fn set(&self, cpu_mmu: &mut CpuMmu, value: u8) -> Result<(), CpuMmuError> {
@@ -225,16 +228,58 @@ impl PpuStatus {
 impl MemoryMappedReg for PpuStatus {
     const CPU_ADDR: u16 = 0x2002;
 
-    fn get(&self, cpu_mmu: &CpuMmu) -> Option<u8> {
+    fn get(&self, cpu_mmu: &mut CpuMmu) -> Option<u8> {
         // Get the register from memory
-        let ppu_status = cpu_mmu.read_u8(Self::CPU_ADDR as usize)?;
+        let (ppu_status, _nes_effect) = cpu_mmu
+            .read_u8(Self::CPU_ADDR as usize)
+            .ok()?;
 
         // Reading the status register will clear bit 7 mentioned above and
         // also the address latch used by PPUSCROLL and PPUADDR. It does not
         // clear the sprite 0 hit or overflow bit.
         let ppu_status = (0xFF - 1) & ppu_status;
+        // Set the new value for the register
+        self.set(cpu_mmu, ppu_status).ok()?;
 
         Some(ppu_status)
+    }
+
+    // This register is supposed to be read only
+    fn set(&self, cpu_mmu: &mut CpuMmu, value: u8) -> Result<(), CpuMmuError> {
+        // Initialize the first byte as the original address of the memory
+        // mapped register to be stored
+        let mut addr: u16 = Self::CPU_ADDR;
+
+        // Mmu registers are mirrored every 8 bytes between
+        // the 0x2000 and 0x3FFF inclusive range
+        while addr < PPU_REGS_MIRROR_END_ADDR && (addr as usize) < cpu_mmu.size() {
+            // Set the new value for the register
+            cpu_mmu.set(addr as usize, value)?;
+            // Mirror the action every 8 bytes
+            addr += 8;
+        }
+        Ok(())
+    }
+}
+
+/// The CPU can access the PPU memory, by writing to the PPU Addr the address
+/// where the CPU wants to write in VRAM. This is accomplished by writing twice
+/// to the PPU, essentially splitting a `u16` address into two bytes, writing
+/// the upper byte first.
+/// We wrap a u16 into the `PpuAddr` to keep a cache of the current PPU value.
+#[derive(Debug)]
+pub struct PpuAddr(u16);
+
+impl MemoryMappedReg for PpuAddr {
+    const CPU_ADDR: u16 = PPU_ADDR_CPU_MMU_ADDR as u16;
+
+    fn get(&self, cpu_mmu: &mut CpuMmu) -> Option<u8> {
+        // Get the register from memory. Logic for the NesEffect is already
+        // implemented in the CPU Mmu code
+        let (ppu_addr, _nes_effect) = cpu_mmu.read_u8(Self::CPU_ADDR as usize)
+            .ok()?;
+
+        Some(ppu_addr)
     }
 
     // This register is supposed to be read only
@@ -261,11 +306,12 @@ pub struct Ppu {
     ppu_ctrl: PpuCtrl,
     ppu_mask: PpuMask,
     ppu_status: PpuStatus,
+    pub ppu_addr: PpuAddr,
     // Folowing are the 4 PPU internal registers
     v_reg: VReg,
     t_reg: TReg,
     x_reg: XReg,
-    w_reg: WReg,
+    pub w_reg: WReg,
 }
 
 impl Ppu {
@@ -279,11 +325,14 @@ impl Ppu {
         ppu_mask.set(&mut *cpu_mmu, 0).expect("Cannot set PPU Mask");
         let ppu_status = PpuStatus;
         ppu_status.set(&mut *cpu_mmu, 0b1010_0000).expect("Cannot set PPU Status");
+        let ppu_addr = PpuAddr(0);
+        ppu_addr.set(&mut *cpu_mmu, 0b0000_0000).expect("Cannot set PPU Addr");
 
         Self {
            ppu_ctrl,
            ppu_mask,
            ppu_status,
+           ppu_addr,
            v_reg: VReg(0),
            t_reg: TReg(0),
            x_reg: XReg(0),
@@ -299,6 +348,45 @@ impl Ppu {
         let mut cpu_mmu = cpu_mmu.lock().unwrap();
         // Set vblank flag
         self.ppu_status.set_vblank(&mut *cpu_mmu)
+    }
+
+    pub fn set_ppuaddr(
+        &mut self,
+        cpu_mmu: &mut CpuMmu,
+    ) -> Result<(), CpuMmuError> {
+        // Acquire the lock to write memory
+        //let mut cpu_mmu = cpu_mmu.lock().unwrap();
+        // We first fetch the address that was written to.
+        let value = self.ppu_addr.get(cpu_mmu)
+            .ok_or(CpuMmuError::FailedToGetPpuAddr)?;
+        println!("[Debug] Value {:?}", value);
+        //println!("[Debug] Value: {}", value);
+        // Depending on the value of the `w` register latch, we will update our
+        // internal caches ppu address accordingly.
+        if self.w_reg.0 == 0 {
+            self.ppu_addr = PpuAddr(value as u16);
+        } else {
+            self.ppu_addr = PpuAddr((self.ppu_addr.0 << 8) | value as u16);
+        }
+
+        self.w_reg = WReg(1 - self.w_reg.0);
+        Ok(())
+    }
+
+    pub fn read_ppustatus(
+        &mut self,
+        cpu_mmu: &mut CpuMmu,
+    ) -> Result<(), CpuMmuError> {
+        // When the `PpuStatus` is read, bit 7 is cleared. This logic is
+        // already implemented in `get` method.
+        // We first fetch the address that was written to.
+        let value = self.ppu_status.get(cpu_mmu)
+            .ok_or(CpuMmuError::FailedToGetPpuStatus)?;
+
+        // The latch of the `w` register is also cleared
+        self.w_reg = WReg(0);
+
+        Ok(())
     }
 
     /// PPU sprite evaluation is an operation done by the PPU once each
@@ -334,7 +422,7 @@ pub struct XReg(u8);
 /// Clears on reads of PPUSTATUS. Sometimes called the 'write latch' or
 /// 'write toggle'.
 #[derive(Debug, Default)]
-pub struct WReg(u8);
+pub struct WReg(pub u8);
 
 #[cfg(test)]
 mod tests {
@@ -348,14 +436,14 @@ mod tests {
             // Set the register
             ppu_reg.set(&mut cpu_mmu, $value).expect("Cannot set the PPU register");
 
-            let ppu_reg_value = ppu_reg.get(&cpu_mmu)
+            let ppu_reg_value = ppu_reg.get(&mut cpu_mmu)
                 .expect("Failed to fetch ppu reg");
 
             assert!(ppu_reg_value == $value);
         };
     }
 
-    //#[test]
+    #[test]
     fn test_get_ppu_ctrl() {
         test_ppu_reg_value!(0x10, PpuCtrl::from(0x10));
         test_ppu_reg_value!(0x19, PpuMask);

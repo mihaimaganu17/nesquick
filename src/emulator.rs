@@ -11,7 +11,7 @@ use std::{
     sync::{Arc, Mutex, mpsc},
     thread,
 };
-use io::{LivingRoomTV, LivingRoomTVError};
+pub use io::{LivingRoomTV, LivingRoomTVError};
 
 pub struct Emulator {
     cpu: Cpu,
@@ -38,7 +38,11 @@ impl Emulator {
         }
     }
 
-    pub fn load_nes(&mut self, nes: INes) -> Result<(), EmulatorError> {
+    pub fn load_nes(
+        &mut self,
+        nes: INes,
+        maybe_lr_tv: Option<&mut LivingRoomTV>,
+    ) -> Result<(), EmulatorError> {
         // Load CPU memory
         {
             // Acquire a lock to the CPU memory unit
@@ -47,20 +51,17 @@ impl Emulator {
             cpu_mmu.set_bytes(0x8000, nes.prg_rom())?;
         }
 
+        let mut ppu_mmu = &mut self.ppu_mmu;
         // Load PPU memory
-        {
-            // Acquire a lock to the CPU memory unit
-            let mut ppu_mmu = &mut self.ppu_mmu;
-            // Load the cpu memory
-            ppu_mmu.set_bytes(0x0000, nes.chr_rom())?;
+        ppu_mmu.set_bytes(0x0000, nes.chr_rom())?;
 
+        if let Some(lr_tv) = maybe_lr_tv {
             // Following snippet renders the PPU tiles from the pattern tables
             // as bits in a terminal
 
             // Get the bytes of the pattern table
             let pattern_table = ppu_mmu.pattern_table(0).unwrap();
 
-            let mut lr_tv = LivingRoomTV::init().unwrap();
             let mut tile_data = Vec::with_capacity(8*8*3);
             let mut x = 0;
             let mut y = 0;
@@ -68,7 +69,6 @@ impl Emulator {
                 let start = tile_idx * 16;
                 let end = (tile_idx + 1) * 16;
                 tile_data.clear();
-                //println!("Start Of Tile: {start} -> {end}");
                 for pos in start..(end-8) {
                     let plane_0_byte = pattern_table[pos];
                     let plane_1_byte = pattern_table[pos + 8];
@@ -136,9 +136,12 @@ impl Emulator {
             })
         };
 
+
         while let Ok(message) = rx.recv() {
+            let mut last_cycles = 0;
             match message {
                 Message::Cycles(cycles) => {
+                    last_cycles = cycles;
                     // We wait until we pass 2 important CPU milestones, to mimic the
                     // behaviour of the PPU, which is:
 
@@ -163,7 +166,18 @@ impl Emulator {
                         NesEffect::Ppu(ppu_effect) => {
                             match ppu_effect {
                                 PpuEffect::PpuAddrWrite => {
-                                    println!("addr_write");
+                                    let cpu_mmu = self.cpu_mmu.clone();
+                                    let mut cpu_mmu = cpu_mmu.lock().unwrap();
+                                    self.ppu.set_ppuaddr(&mut *cpu_mmu)?;
+                                    if self.ppu.w_reg.0 == 0 {
+                                        println!("[Debug] PPU ADDR now: 0x{:x?}", self.ppu.ppu_addr);
+                                    }
+                                    println!("cycles1 {:?}", last_cycles)
+                                }
+                                PpuEffect::PpuStatusRead => {
+                                    let cpu_mmu = self.cpu_mmu.clone();
+                                    let mut cpu_mmu = cpu_mmu.lock().unwrap();
+                                    self.ppu.read_ppustatus(&mut *cpu_mmu)?;
                                 }
                                 _ => {}
                             }
@@ -239,7 +253,7 @@ mod test {
         let ines = INes::parse(&mut reader).expect("Failed to parse INes");
 
         let mut emu = Emulator::new();
-        emu.load_nes(ines).expect("Failed to load file in Emulator");
-        //emu.execute().expect("Failed to execute emulator");
+        emu.load_nes(ines, None).expect("Failed to load file in Emulator");
+        emu.execute().expect("Failed to execute emulator");
     }
 }
