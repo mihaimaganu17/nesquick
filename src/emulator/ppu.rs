@@ -1,6 +1,7 @@
 //! Module representint a NES emulator Picture Processing Unit (PPU)
-use crate::emulator::{CpuMmu, CpuMmuError};
-use std::sync::{Arc, Mutex};
+use crate::emulator::{CpuMmu, CpuMmuError, Message};
+use std::sync::{Arc, Mutex, Condvar, mpsc};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub const PPU_CTRL_CPU_MMU_ADDR: usize = 0x2000;
 pub const PPU_MASK_CPU_MMU_ADDR: usize = 0x2001;
@@ -312,6 +313,27 @@ pub struct Ppu {
     t_reg: TReg,
     x_reg: XReg,
     pub w_reg: WReg,
+    // The PPU renders 262 scanlines per frame. Each scanline lasts for
+    // 341 PPU clock cycles
+    // (113.667 CPU clock cycles; 1 CPU cycle = 3 PPU cycles),
+    // with each clock cycle producing one pixel. The line numbers given here
+    // correspond to how the internal PPU frame counters count lines.
+    // PPUCC = CPUCC * 3
+    // Scanline = PPUCC div 341 - 21;   X- coordinate
+    // PixelOfs = PPUCC mod 341;        Y- coordinate
+    // CPUcollisionCC = ((Y+21)*341+X)/3
+    // The PPU renders 3 pixels in one CPU clock. Therefore, by multiplying the
+    // CPU CC figure by 3, we get the total amount of pixels that have been
+    // rendered (including non-displayed ones) since the VINT.
+    // 341 pixels are rendered per scanline (although only 256 are displayed).
+    // Therefore, by dividing PPUCC by this, we get the # of completely
+    // rendered scanlines since the VINT. 21 blank scanlines are rendered
+    // before the first visible one is displayed. So, to get a scanline offset
+    // into the actual on-screen image, we simply subtract the amount of
+    // non-displayed scanlines. Note that if this yeilds a negative number, the
+    // PPU is still in the V-blank period.
+    pub cycles: usize,
+    pub scanline: usize,
 }
 
 impl Ppu {
@@ -337,6 +359,43 @@ impl Ppu {
            t_reg: TReg(0),
            x_reg: XReg(0),
            w_reg: WReg(0),
+           cycles: 0,
+           scanline: 0,
+        }
+    }
+
+    /// Execute the PPU for `max_scanline` count
+    pub fn execute(
+        &mut self,
+        tx: mpsc::Sender<Message>,
+        sync_cycles: Arc<(Mutex<bool>, AtomicUsize, Condvar)>,
+    ) -> Result<(), PpuError> {
+        loop {
+            let (lock, cpu_cycles, cond_var) = &*sync_cycles;
+            let mut is_synced = lock.lock().unwrap();
+
+            // While we still have to catch up, we are catching up
+            while cpu_cycles.load(Ordering::SeqCst) > self.cycles {
+                self.cycles += 1;
+            }
+            *is_synced = true;
+            // At this point, we have caught up with the CPU and we can wake
+            // the CPU to continue its execution
+            cond_var.notify_all();
+            println!("[PPU is sync] Cpu cycles: {:?} -> Ppu cycles: {:?}",
+                cpu_cycles.load(Ordering::SeqCst),
+                self.cycles,
+            );
+
+            // After we have notified all, we wait until we are notified that
+            // we are out of sync
+            while *is_synced {
+                is_synced = cond_var.wait(is_synced).unwrap();
+            }
+            println!("[PPU is NOT sync] Cpu cycles: {:?} -> Ppu cycles: {:?}",
+                cpu_cycles.load(Ordering::SeqCst),
+                self.cycles,
+            );
         }
     }
 
@@ -410,6 +469,9 @@ impl Ppu {
         Some(())
     }
 }
+
+#[derive(Debug)]
+pub enum PpuError {}
 
 #[derive(Debug, Default)]
 pub struct VReg(u8);

@@ -6,11 +6,12 @@ mod io;
 use crate::nes::INes;
 use cpu::{Cpu, CpuError};
 use mmu::{CpuMmu, CpuMmuError, PpuMmu, PpuMmuError};
-use ppu::{Ppu, PpuEffect};
+use ppu::{Ppu, PpuEffect, PpuError};
 use std::{
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, Mutex, mpsc, Condvar},
     thread,
 };
+use core::sync::atomic::AtomicUsize;
 pub use io::{LivingRoomTV, LivingRoomTVError};
 
 pub struct Emulator {
@@ -21,6 +22,7 @@ pub struct Emulator {
     cpu_mmu: Arc<Mutex<CpuMmu>>,
     ppu: Ppu,
     ppu_mmu: PpuMmu,
+    sync_cycles: Arc<(Mutex<bool>, AtomicUsize, Condvar)>,
 }
 
 impl Emulator {
@@ -29,12 +31,14 @@ impl Emulator {
         let cpu_mmu = Arc::new(Mutex::new(CpuMmu::default()));
         let ppu = Ppu::power_up(cpu_mmu.clone());
         let ppu_mmu = PpuMmu::default();
+        let sync_cycles = Arc::new((Mutex::new(false), AtomicUsize::new(0), Condvar::new()));
 
         Emulator {
             cpu,
             cpu_mmu,
             ppu,
             ppu_mmu,
+            sync_cycles,
         }
     }
 
@@ -102,6 +106,9 @@ impl Emulator {
     }
 
     pub fn execute(mut self) -> Result<(), EmulatorError> {
+        // The PPU and the CPU run in  parallel on the hardware, so in our case
+        // we will send each to its own thread and synchronise their cycles.
+
         // Get the address of the entrypoint
         let entrypoint = {
             // Acquire a lock to the CPU memory unit. The lock will drop at the
@@ -130,13 +137,33 @@ impl Emulator {
             let cpu_mmu = self.cpu_mmu.clone();
             // Clone the transmitter
             let tx = tx.clone();
+            // Clone the conditional variable that helps us synchronise the
+            // devices
+            let sync_cycles= self.sync_cycles.clone();
 
             thread::spawn(move || -> Result<(), CpuError> {
-                self.cpu.execute(cpu_mmu, tx)
+                self.cpu.execute(cpu_mmu, tx, sync_cycles)
             })
         };
 
+        let ppu_thread_handle = {
+            // Clone the CPU MMU unit in order to send it to the CPU
+            //let cpu_mmu = self.cpu_mmu.clone();
+            // Clone the transmitter
+            let tx = tx.clone();
+            // Clone the conditional variable that helps us synchronise the
+            // devices
+            let sync_cycles= self.sync_cycles.clone();
 
+            thread::spawn(move || -> Result<(), PpuError> {
+                self.ppu.execute(tx, sync_cycles)
+            })
+        };
+
+        let (lock, cpu_cycles, cond_var) = &*self.sync_cycles;
+
+
+        /*
         while let Ok(message) = rx.recv() {
             let mut last_cycles = 0;
             match message {
@@ -169,9 +196,11 @@ impl Emulator {
                                     let cpu_mmu = self.cpu_mmu.clone();
                                     let mut cpu_mmu = cpu_mmu.lock().unwrap();
                                     self.ppu.set_ppuaddr(&mut *cpu_mmu)?;
+                                    /*
                                     if self.ppu.w_reg.0 == 0 {
                                         println!("[Debug] PPU ADDR now: 0x{:x?}", self.ppu.ppu_addr);
                                     }
+                                    */
                                     println!("cycles1 {:?}", last_cycles)
                                 }
                                 PpuEffect::PpuStatusRead => {
@@ -187,8 +216,10 @@ impl Emulator {
                 }
             }
         }
+    */
 
-        let res = cpu_thread_handle.join();
+        let cpu_joined = cpu_thread_handle.join();
+        let ppu_joined = ppu_thread_handle.join();
 
         Ok(())
     }
