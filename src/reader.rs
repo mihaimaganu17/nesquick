@@ -46,7 +46,7 @@ impl Reader {
 
 // Type of endian we can parse
 #[derive(Debug)]
-enum Endian {
+pub enum Endian {
     Little,
     Big,
 }

@@ -1,6 +1,25 @@
 //! Module representint a NES emulator Picture Processing Unit (PPU)
-use crate::emulator::{CpuMmu, CpuMmuError};
-use std::sync::{Arc, Mutex};
+use crate::emulator::{CpuMmu, CpuMmuError, Message};
+use std::sync::{Arc, Mutex, Condvar, mpsc};
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+pub const PPU_CTRL_CPU_MMU_ADDR: usize = 0x2000;
+pub const PPU_MASK_CPU_MMU_ADDR: usize = 0x2001;
+pub const PPU_STATUS_CPU_MMU_ADDR: usize = 0x2002;
+pub const PPU_OAMADDR_CPU_MMU_ADDR: usize = 0x2003;
+pub const PPU_OAMDATA_CPU_MMU_ADDR: usize = 0x2004;
+pub const PPU_SCROLL_CPU_MMU_ADDR: usize = 0x2005;
+pub const PPU_ADDR_CPU_MMU_ADDR: usize = 0x2006;
+pub const PPU_DATA_CPU_MMU_ADDR: usize = 0x2007;
+pub const PPU_OAMDMA_CPU_MMU_ADDR: usize = 0x2007;
+
+#[derive(Debug)]
+pub enum PpuEffect {
+    PpuStatusRead,
+    PpuStatusWrite,
+    PpuAddrRead,
+    PpuAddrWrite,
+}
 
 // Trait that needs to be implemented by a register that is memory mapped
 // This is usually needed by registers used to communicate between the CPU
@@ -12,7 +31,7 @@ trait MemoryMappedReg {
     const CPU_ADDR: u16;
 
     /// Get method to get the register from the specified `mmu` memory unit
-    fn get(&self, cpu_mmu: &CpuMmu) -> Option<u8>;
+    fn get(&self, cpu_mmu: &mut CpuMmu) -> Option<u8>;
 
     /// Get method to get the register from the specified memmory unit.
     fn set(&self, cpu_mmu: &mut CpuMmu, value: u8) -> Result<(), CpuMmuError>;
@@ -27,7 +46,7 @@ const PPU_REGS_MIRROR_END_ADDR: u16 = 0x4000;
 /// PPU controller register. Access: write
 /// Contains various flags controlling PPU operation.
 #[derive(Debug)]
-pub struct PpuCtrl {
+struct PpuCtrl {
     // Base nametable address
     // (0 = $2000; 1 = $2400; 2 = $2800; 3 = $2C00)
     base_nt_addr: u16,
@@ -88,7 +107,7 @@ impl From<u8> for PpuCtrl {
 
 /// VRAM address increment per CPU read/write
 #[derive(Debug)]
-pub enum VramInc {
+enum VramInc {
     // Add 1, going across
     Add1X,
     // Add 32, going down
@@ -146,7 +165,7 @@ impl SpriteSize {
 /// This register controls the rendering of sprites and backgrounds, as well
 /// as colour effects.
 #[derive(Debug)]
-pub struct PpuMask;
+struct PpuMask;
 
 // Macro that implements the trait `MemoryMappedReg` for memory mapped PPU
 // registers in the CPU's memory.
@@ -155,8 +174,11 @@ macro_rules! memory_map_ppu_reg {
         impl MemoryMappedReg for $reg {
             const CPU_ADDR: u16 = $addr;
 
-            fn get(&self, cpu_mmu: &CpuMmu) -> Option<u8> {
-                cpu_mmu.read_u8(Self::CPU_ADDR as usize)
+            fn get(&self, cpu_mmu: &mut CpuMmu) -> Option<u8> {
+                let (value, _nes_effect) = cpu_mmu
+                    .read_u8(Self::CPU_ADDR as usize)
+                    .ok()?;
+                Some(value)
             }
 
             fn set(&self, cpu_mmu: &mut CpuMmu, value: u8) -> Result<(), CpuMmuError> {
@@ -207,16 +229,58 @@ impl PpuStatus {
 impl MemoryMappedReg for PpuStatus {
     const CPU_ADDR: u16 = 0x2002;
 
-    fn get(&self, cpu_mmu: &CpuMmu) -> Option<u8> {
+    fn get(&self, cpu_mmu: &mut CpuMmu) -> Option<u8> {
         // Get the register from memory
-        let ppu_status = cpu_mmu.read_u8(Self::CPU_ADDR as usize)?;
+        let (ppu_status, _nes_effect) = cpu_mmu
+            .read_u8(Self::CPU_ADDR as usize)
+            .ok()?;
 
         // Reading the status register will clear bit 7 mentioned above and
         // also the address latch used by PPUSCROLL and PPUADDR. It does not
         // clear the sprite 0 hit or overflow bit.
         let ppu_status = (0xFF - 1) & ppu_status;
+        // Set the new value for the register
+        self.set(cpu_mmu, ppu_status).ok()?;
 
         Some(ppu_status)
+    }
+
+    // This register is supposed to be read only
+    fn set(&self, cpu_mmu: &mut CpuMmu, value: u8) -> Result<(), CpuMmuError> {
+        // Initialize the first byte as the original address of the memory
+        // mapped register to be stored
+        let mut addr: u16 = Self::CPU_ADDR;
+
+        // Mmu registers are mirrored every 8 bytes between
+        // the 0x2000 and 0x3FFF inclusive range
+        while addr < PPU_REGS_MIRROR_END_ADDR && (addr as usize) < cpu_mmu.size() {
+            // Set the new value for the register
+            cpu_mmu.set(addr as usize, value)?;
+            // Mirror the action every 8 bytes
+            addr += 8;
+        }
+        Ok(())
+    }
+}
+
+/// The CPU can access the PPU memory, by writing to the PPU Addr the address
+/// where the CPU wants to write in VRAM. This is accomplished by writing twice
+/// to the PPU, essentially splitting a `u16` address into two bytes, writing
+/// the upper byte first.
+/// We wrap a u16 into the `PpuAddr` to keep a cache of the current PPU value.
+#[derive(Debug)]
+pub struct PpuAddr(u16);
+
+impl MemoryMappedReg for PpuAddr {
+    const CPU_ADDR: u16 = PPU_ADDR_CPU_MMU_ADDR as u16;
+
+    fn get(&self, cpu_mmu: &mut CpuMmu) -> Option<u8> {
+        // Get the register from memory. Logic for the NesEffect is already
+        // implemented in the CPU Mmu code
+        let (ppu_addr, _nes_effect) = cpu_mmu.read_u8(Self::CPU_ADDR as usize)
+            .ok()?;
+
+        Some(ppu_addr)
     }
 
     // This register is supposed to be read only
@@ -243,6 +307,33 @@ pub struct Ppu {
     ppu_ctrl: PpuCtrl,
     ppu_mask: PpuMask,
     ppu_status: PpuStatus,
+    pub ppu_addr: PpuAddr,
+    // Folowing are the 4 PPU internal registers
+    v_reg: VReg,
+    t_reg: TReg,
+    x_reg: XReg,
+    pub w_reg: WReg,
+    // The PPU renders 262 scanlines per frame. Each scanline lasts for
+    // 341 PPU clock cycles
+    // (113.667 CPU clock cycles; 1 CPU cycle = 3 PPU cycles),
+    // with each clock cycle producing one pixel. The line numbers given here
+    // correspond to how the internal PPU frame counters count lines.
+    // PPUCC = CPUCC * 3
+    // Scanline = PPUCC div 341 - 21;   X- coordinate
+    // PixelOfs = PPUCC mod 341;        Y- coordinate
+    // CPUcollisionCC = ((Y+21)*341+X)/3
+    // The PPU renders 3 pixels in one CPU clock. Therefore, by multiplying the
+    // CPU CC figure by 3, we get the total amount of pixels that have been
+    // rendered (including non-displayed ones) since the VINT.
+    // 341 pixels are rendered per scanline (although only 256 are displayed).
+    // Therefore, by dividing PPUCC by this, we get the # of completely
+    // rendered scanlines since the VINT. 21 blank scanlines are rendered
+    // before the first visible one is displayed. So, to get a scanline offset
+    // into the actual on-screen image, we simply subtract the amount of
+    // non-displayed scanlines. Note that if this yeilds a negative number, the
+    // PPU is still in the V-blank period.
+    pub cycles: usize,
+    pub scanline: usize,
 }
 
 impl Ppu {
@@ -256,11 +347,55 @@ impl Ppu {
         ppu_mask.set(&mut *cpu_mmu, 0).expect("Cannot set PPU Mask");
         let ppu_status = PpuStatus;
         ppu_status.set(&mut *cpu_mmu, 0b1010_0000).expect("Cannot set PPU Status");
+        let ppu_addr = PpuAddr(0);
+        ppu_addr.set(&mut *cpu_mmu, 0b0000_0000).expect("Cannot set PPU Addr");
 
         Self {
            ppu_ctrl,
            ppu_mask,
            ppu_status,
+           ppu_addr,
+           v_reg: VReg(0),
+           t_reg: TReg(0),
+           x_reg: XReg(0),
+           w_reg: WReg(0),
+           cycles: 0,
+           scanline: 0,
+        }
+    }
+
+    /// Execute the PPU for `max_scanline` count
+    pub fn execute(
+        &mut self,
+        tx: mpsc::Sender<Message>,
+        sync_cycles: Arc<(Mutex<bool>, AtomicUsize, Condvar)>,
+    ) -> Result<(), PpuError> {
+        loop {
+            let (lock, cpu_cycles, cond_var) = &*sync_cycles;
+            let mut is_synced = lock.lock().unwrap();
+
+            // While we still have to catch up, we are catching up
+            while cpu_cycles.load(Ordering::SeqCst) > self.cycles {
+                self.cycles += 1;
+            }
+            *is_synced = true;
+            // At this point, we have caught up with the CPU and we can wake
+            // the CPU to continue its execution
+            cond_var.notify_all();
+            println!("[PPU is sync] Cpu cycles: {:?} -> Ppu cycles: {:?}",
+                cpu_cycles.load(Ordering::SeqCst),
+                self.cycles,
+            );
+
+            // After we have notified all, we wait until we are notified that
+            // we are out of sync
+            while *is_synced {
+                is_synced = cond_var.wait(is_synced).unwrap();
+            }
+            println!("[PPU is NOT sync] Cpu cycles: {:?} -> Ppu cycles: {:?}",
+                cpu_cycles.load(Ordering::SeqCst),
+                self.cycles,
+            );
         }
     }
 
@@ -273,7 +408,83 @@ impl Ppu {
         // Set vblank flag
         self.ppu_status.set_vblank(&mut *cpu_mmu)
     }
+
+    pub fn set_ppuaddr(
+        &mut self,
+        cpu_mmu: &mut CpuMmu,
+    ) -> Result<(), CpuMmuError> {
+        // Acquire the lock to write memory
+        //let mut cpu_mmu = cpu_mmu.lock().unwrap();
+        // We first fetch the address that was written to.
+        let value = self.ppu_addr.get(cpu_mmu)
+            .ok_or(CpuMmuError::FailedToGetPpuAddr)?;
+        println!("[Debug] Value {:?}", value);
+        //println!("[Debug] Value: {}", value);
+        // Depending on the value of the `w` register latch, we will update our
+        // internal caches ppu address accordingly.
+        if self.w_reg.0 == 0 {
+            self.ppu_addr = PpuAddr(value as u16);
+        } else {
+            self.ppu_addr = PpuAddr((self.ppu_addr.0 << 8) | value as u16);
+        }
+
+        self.w_reg = WReg(1 - self.w_reg.0);
+        Ok(())
+    }
+
+    pub fn read_ppustatus(
+        &mut self,
+        cpu_mmu: &mut CpuMmu,
+    ) -> Result<(), CpuMmuError> {
+        // When the `PpuStatus` is read, bit 7 is cleared. This logic is
+        // already implemented in `get` method.
+        // We first fetch the address that was written to.
+        let value = self.ppu_status.get(cpu_mmu)
+            .ok_or(CpuMmuError::FailedToGetPpuStatus)?;
+
+        // The latch of the `w` register is also cleared
+        self.w_reg = WReg(0);
+
+        Ok(())
+    }
+
+    /// PPU sprite evaluation is an operation done by the PPU once each
+    /// scanline. It prepares the set of sprites and fetches their data to be
+    /// rendered on the next scanline. This is a separate step from sprite
+    /// rendering.
+    /// https://www.nesdev.org/wiki/PPU_sprite_evaluation
+    /// Each scanline, the PPU reads the spritelist
+    /// (that is, Object Attribute Memory) to see which
+    /// to draw:
+    ///     1. First, it clears the list of sprites to draw.
+    ///     2. Second, it reads through OAM, checking which sprites will be on
+    ///     this scanline. It chooses the first eight it finds that do.
+    ///     3. Third, if eight sprites were found, it checks (in a
+    ///     wrongly-implemented fashion) for further sprites on the scanline to
+    ///     see if the sprite overflow flag should be set.
+    ///     4. Fourth, using the details for the eight (or fewer) sprites
+    ///     chosen, it determines which pixels each has on the scanline and
+    ///     where to draw them.
+    pub fn sprite_eval() -> Option<()> {
+        Some(())
+    }
 }
+
+#[derive(Debug)]
+pub enum PpuError {}
+
+#[derive(Debug, Default)]
+pub struct VReg(u8);
+#[derive(Debug, Default)]
+pub struct TReg(u8);
+#[derive(Debug, Default)]
+pub struct XReg(u8);
+/// Denotes the first or second write toggle. Toggles on each write to either
+/// PPUSCROLL or PPUADDR, indicating whether this is the first or second write.
+/// Clears on reads of PPUSTATUS. Sometimes called the 'write latch' or
+/// 'write toggle'.
+#[derive(Debug, Default)]
+pub struct WReg(pub u8);
 
 #[cfg(test)]
 mod tests {
@@ -287,7 +498,7 @@ mod tests {
             // Set the register
             ppu_reg.set(&mut cpu_mmu, $value).expect("Cannot set the PPU register");
 
-            let ppu_reg_value = ppu_reg.get(&cpu_mmu)
+            let ppu_reg_value = ppu_reg.get(&mut cpu_mmu)
                 .expect("Failed to fetch ppu reg");
 
             assert!(ppu_reg_value == $value);

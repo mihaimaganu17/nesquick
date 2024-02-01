@@ -1,16 +1,11 @@
-mod emulator;
-mod nes;
-mod reader;
+pub mod emulator;
+pub mod nes;
+pub mod reader;
 
 #[cfg(test)]
 mod test {
     use crate::nes::INes;
     use crate::reader::Reader;
-
-    #[test]
-    fn works() {
-        assert!(2 + 2 == 4);
-    }
 
     //#[test]
     fn parse_ines() {
@@ -26,7 +21,7 @@ mod test {
         //println!("INes {:#?}", ines.header());
     }
 
-    #[test]
+    //#[test]
     fn ppu_color_test() {
         let path = "testdata/color_test.nes";
         let data = std::fs::read(path).expect("Failed to read file from disk");

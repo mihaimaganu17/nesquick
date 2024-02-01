@@ -4,3 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+bitflags = { version = "2.4.1" }
+
+[dependencies.sdl2]
+version = "0.36.0"
+
+[[bin]]
+name = "play_nes"
+test = false
+bench = false

@@ -63,6 +63,10 @@ impl INes {
     pub fn prg_rom(&self) -> &[u8] {
         &self.prg_rom
     }
+
+    pub fn chr_rom(&self) -> &[u8] {
+        &self.chr_rom
+    }
 }
 
 #[derive(Debug)]
