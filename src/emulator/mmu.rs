@@ -74,10 +74,35 @@ impl CpuMmu {
             // potential other effects
             match offset {
                 ppu::PPU_ADDR_CPU_MMU_ADDR => {
-                    let data = self.data
-                        .get(range.clone());
-                    println!("[Debug] bytes {:?}, data {:?}", bytes, data);
                     NesEffect::Ppu(ppu::PpuEffect::PpuAddrWrite)
+                }
+                ppu::PPU_OAMADDR_CPU_MMU_ADDR => {
+                    if bytes != &[0] {
+                        println!("OAMADDR_WRITE: {:#?}", bytes);
+                        let mut line = String::new();
+                        std::io::stdin().read_line(&mut line).expect("Failed");
+                    }
+                    NesEffect::Ppu(ppu::PpuEffect::OamAddrWrite)
+                }
+                ppu::PPU_OAMDATA_CPU_MMU_ADDR => {
+                    // Writes will incrmeent OamAddr
+                    self.data[ppu::PPU_OAMADDR_CPU_MMU_ADDR] += 1;
+                    panic!("OAMDATA_WRITE");
+                    NesEffect::Ppu(ppu::PpuEffect::OamDataWrite)
+                }
+                ppu::PPU_OAMDMA_CPU_MMU_ADDR => {
+                    // Writing 0xXX will upload 256 bytes of data from
+                    // CPU page 0xXX00 - 0xXXFF to the internal PPU OAM.
+                    // Thi page is typically loacted in internal RAM, commonly
+                    // 0x0200 - 0x02FF, but cartridge RAM or ROM can be used as
+                    // well.
+                    //
+                    println!("OAMDMA_WRITE: {:#?}", bytes);
+                    let mut line = String::new();
+                    std::io::stdin().read_line(&mut line).expect("Failed");
+
+                    assert!(bytes.len() == 1);
+                    NesEffect::Ppu(ppu::PpuEffect::OamDmaWrite(bytes[0]))
                 }
                 _ => NesEffect::None
             }

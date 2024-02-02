@@ -22,7 +22,7 @@ pub struct Emulator {
     cpu_mmu: Arc<Mutex<CpuMmu>>,
     ppu: Ppu,
     ppu_mmu: PpuMmu,
-    sync_cycles: Arc<(Mutex<bool>, AtomicUsize, Condvar)>,
+    sync_cycles: Arc<(Mutex<bool>, Mutex<bool>, AtomicUsize, Condvar, Condvar)>,
 }
 
 impl Emulator {
@@ -31,7 +31,13 @@ impl Emulator {
         let cpu_mmu = Arc::new(Mutex::new(CpuMmu::default()));
         let ppu = Ppu::power_up(cpu_mmu.clone());
         let ppu_mmu = PpuMmu::default();
-        let sync_cycles = Arc::new((Mutex::new(false), AtomicUsize::new(0), Condvar::new()));
+        let sync_cycles = Arc::new((
+                Mutex::new(false),
+                Mutex::new(false),
+                AtomicUsize::new(0),
+                Condvar::new(),
+                Condvar::new()),
+        );
 
         Emulator {
             cpu,
@@ -154,13 +160,15 @@ impl Emulator {
             // Clone the conditional variable that helps us synchronise the
             // devices
             let sync_cycles= self.sync_cycles.clone();
+            // Clone the CPU MMU unit in order to send it to the CPU
+            let cpu_mmu = self.cpu_mmu.clone();
 
             thread::spawn(move || -> Result<(), PpuError> {
-                self.ppu.execute(tx, sync_cycles)
+                self.ppu.execute(tx, cpu_mmu, sync_cycles)
             })
         };
 
-        let (lock, cpu_cycles, cond_var) = &*self.sync_cycles;
+        let (lock, ppu_dma_lock, cpu_cycles, cond_var, dma_cond) = &*self.sync_cycles;
 
 
         /*

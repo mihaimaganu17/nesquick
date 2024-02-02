@@ -2,7 +2,7 @@
 mod opcode;
 mod addr;
 
-use crate::emulator::{CpuMmu, CpuMmuError, Message, NesEffect};
+use crate::emulator::{PpuEffect, CpuMmu, CpuMmuError, Message, NesEffect};
 use addr::{AddrMode, AddrModeError, Idx, SupportedAddrMode};
 use std::sync::{Arc, Mutex, mpsc, Condvar};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -216,7 +216,7 @@ impl Cpu {
         &mut self,
         mmu: Arc<Mutex<CpuMmu>>,
         tx: mpsc::Sender<Message>,
-        sync_cycles: Arc<(Mutex<bool>, AtomicUsize, Condvar)>,
+        sync_cycles: Arc<(Mutex<bool>, Mutex<bool>, AtomicUsize, Condvar, Condvar)>,
     ) -> Result<(), CpuError> {
         // While we are still parsing instructions, loop and execute them
         while let Ok(inst) = Instruction::from_pc(&mut self.pc, mmu.clone()) {
@@ -985,13 +985,39 @@ impl Cpu {
                     _ => todo!(),
                 }
             }
-            let (lock, cpu_cycles, cond_var) = &*sync_cycles;
+            let (lock, ppu_dma_lock, cpu_cycles, cond_var, dma_cond) = &*sync_cycles;
             // Add cycles to the CPU
             self.cycles += inst.cycles();
             let prev_cycles = cpu_cycles.swap(self.cycles, Ordering::SeqCst);
             // This assert makes sure that the local cycle count is always in
             // sync with the one we share with the outside world
             assert!(self.cycles.saturating_sub(inst.cycles) == prev_cycles);
+
+            match nes_effect {
+                // If we are here, we have to halt the CPU and copy data over
+                // to the OAM memory
+                NesEffect::Ppu(PpuEffect::OamDmaWrite(byte)) => {
+                    // We notify all blocked threads on the other condition
+                    // variable, that we are doing a PPU DMA copy
+                    // update. as such, we will ignore syncing for now such
+                    // that we can copy dma over
+                    {
+                        let mut is_synced = lock.lock().unwrap();
+                        // At this point we will assume the other devices are not in sync
+                        *is_synced = false;
+                        cond_var.notify_all();
+                    }
+
+                    let mut copy_dma = ppu_dma_lock.lock().unwrap();
+                    *copy_dma = true;
+                    while *copy_dma {
+                        cond_var.notify_all();
+                        copy_dma = dma_cond.wait(copy_dma).unwrap();
+                    }
+                }
+                _ => {}
+            };
+
             // Send the message back to emulator
             tx.send(Message::NesEffect(nes_effect));
 
@@ -1004,6 +1030,7 @@ impl Cpu {
             // After we update the cycles, we wait until we get notification
             // from the emulator the the PPU has synchronized its cycles with
             // ours.
+            println!("here");
             while !*is_synced {
                 is_synced = cond_var.wait(is_synced).unwrap();
             }
@@ -2758,7 +2785,13 @@ mod cpu_tests {
 
         cpu.set_pc(0);
         let sync_cycles =
-            Arc::new((Mutex::new(false), AtomicUsize::new(0), Condvar::new()));
+            Arc::new((
+                Mutex::new(false),
+                Mutex::new(false),
+                AtomicUsize::new(0),
+                Condvar::new(),
+                Condvar::new(),
+            ));
         cpu.execute(cpu_mmu.clone(), tx.clone(), sync_cycles.clone())
             .expect("Failed to execute");
 
@@ -2780,7 +2813,13 @@ mod cpu_tests {
         }
         cpu.set_pc(0);
         let sync_cycles =
-            Arc::new((Mutex::new(false), AtomicUsize::new(0), Condvar::new()));
+            Arc::new((
+                Mutex::new(false),
+                Mutex::new(false),
+                AtomicUsize::new(0),
+                Condvar::new(),
+                Condvar::new(),
+            ));
         cpu.execute(cpu_mmu.clone(), tx.clone(), sync_cycles.clone())
             .expect("Failed to execute");
 
@@ -2802,7 +2841,13 @@ mod cpu_tests {
         }
         cpu.set_pc(0);
         let sync_cycles =
-            Arc::new((Mutex::new(false), AtomicUsize::new(0), Condvar::new()));
+            Arc::new((
+                Mutex::new(false),
+                Mutex::new(false),
+                AtomicUsize::new(0),
+                Condvar::new(),
+                Condvar::new(),
+            ));
         cpu.execute(cpu_mmu.clone(), tx.clone(), sync_cycles.clone())
             .expect("Failed to execute");
 
@@ -2826,7 +2871,13 @@ mod cpu_tests {
 
         cpu.set_pc(0);
         let sync_cycles =
-            Arc::new((Mutex::new(false), AtomicUsize::new(0), Condvar::new()));
+            Arc::new((
+                Mutex::new(false),
+                Mutex::new(false),
+                AtomicUsize::new(0),
+                Condvar::new(),
+                Condvar::new(),
+            ));
         cpu.execute(cpu_mmu.clone(), tx.clone(), sync_cycles.clone())
             .expect("Failed to execute");
 
@@ -2850,7 +2901,13 @@ mod cpu_tests {
 
         cpu.set_pc(0);
         let sync_cycles =
-            Arc::new((Mutex::new(false), AtomicUsize::new(0), Condvar::new()));
+            Arc::new((
+                Mutex::new(false),
+                Mutex::new(false),
+                AtomicUsize::new(0),
+                Condvar::new(),
+                Condvar::new(),
+            ));
         cpu.execute(cpu_mmu.clone(), tx.clone(), sync_cycles.clone())
             .expect("Failed to execute");
 
@@ -2874,7 +2931,13 @@ mod cpu_tests {
 
         cpu.set_pc(0);
         let sync_cycles =
-            Arc::new((Mutex::new(false), AtomicUsize::new(0), Condvar::new()));
+            Arc::new((
+                Mutex::new(false),
+                Mutex::new(false),
+                AtomicUsize::new(0),
+                Condvar::new(),
+                Condvar::new(),
+            ));
         cpu.execute(cpu_mmu.clone(), tx.clone(), sync_cycles.clone())
             .expect("Failed to execute");
 
@@ -2898,7 +2961,13 @@ mod cpu_tests {
 
         cpu.set_pc(0);
         let sync_cycles =
-            Arc::new((Mutex::new(false), AtomicUsize::new(0), Condvar::new()));
+            Arc::new((
+                Mutex::new(false),
+                Mutex::new(false),
+                AtomicUsize::new(0),
+                Condvar::new(),
+                Condvar::new(),
+            ));
         cpu.execute(cpu_mmu.clone(), tx.clone(), sync_cycles.clone())
             .expect("Failed to execute");
 
@@ -2935,7 +3004,13 @@ mod cpu_tests {
 
         cpu.set_pc(5);
         let sync_cycles =
-            Arc::new((Mutex::new(false), AtomicUsize::new(0), Condvar::new()));
+            Arc::new((
+                Mutex::new(false),
+                Mutex::new(false),
+                AtomicUsize::new(0),
+                Condvar::new(),
+                Condvar::new(),
+            ));
         cpu.execute(cpu_mmu.clone(), tx.clone(), sync_cycles.clone())
             .expect("Failed to execute");
 
@@ -2972,7 +3047,13 @@ mod cpu_tests {
 
         cpu.set_pc(0);
         let sync_cycles =
-            Arc::new((Mutex::new(false), AtomicUsize::new(0), Condvar::new()));
+            Arc::new((
+                Mutex::new(false),
+                Mutex::new(false),
+                AtomicUsize::new(0),
+                Condvar::new(),
+                Condvar::new(),
+            ));
         cpu.execute(cpu_mmu.clone(), tx.clone(), sync_cycles.clone())
             .expect("Failed to execute");
 
@@ -3008,7 +3089,13 @@ mod cpu_tests {
 
         cpu.set_pc(0);
         let sync_cycles =
-            Arc::new((Mutex::new(false), AtomicUsize::new(0), Condvar::new()));
+            Arc::new((
+                Mutex::new(false),
+                Mutex::new(false),
+                AtomicUsize::new(0),
+                Condvar::new(),
+                Condvar::new(),
+            ));
         cpu.execute(cpu_mmu.clone(), tx.clone(), sync_cycles.clone())
             .expect("Failed to execute");
 
@@ -3043,7 +3130,13 @@ mod cpu_tests {
 
         cpu.set_pc(0);
         let sync_cycles =
-            Arc::new((Mutex::new(false), AtomicUsize::new(0), Condvar::new()));
+            Arc::new((
+                Mutex::new(false),
+                Mutex::new(false),
+                AtomicUsize::new(0),
+                Condvar::new(),
+                Condvar::new(),
+            ));
         cpu.execute(cpu_mmu.clone(), tx.clone(), sync_cycles.clone())
             .expect("Failed to execute");
 

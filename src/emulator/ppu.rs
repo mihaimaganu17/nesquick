@@ -19,6 +19,12 @@ pub enum PpuEffect {
     PpuStatusWrite,
     PpuAddrRead,
     PpuAddrWrite,
+    OamAddrRead,
+    OamAddrWrite,
+    OamDataRead,
+    OamDataWrite,
+    OamDmaRead,
+    OamDmaWrite(u8),
 }
 
 // Trait that needs to be implemented by a register that is memory mapped
@@ -200,6 +206,15 @@ macro_rules! memory_map_ppu_reg {
     };
 }
 
+impl PpuMask {
+    pub fn render_background(&self, cpu_mmu: &mut CpuMmu) -> Option<bool> {
+        Some((self.get(cpu_mmu)? >> 3) & 1 != 0)
+    }
+    pub fn render_sprites(&self, cpu_mmu: &mut CpuMmu) -> Option<bool> {
+        Some((self.get(cpu_mmu)? >> 4) & 1 != 0)
+    }
+}
+
 memory_map_ppu_reg!(PpuCtrl, 0x2000);
 memory_map_ppu_reg!(PpuMask, 0x2001);
 
@@ -301,6 +316,17 @@ impl MemoryMappedReg for PpuAddr {
     }
 }
 
+#[derive(Debug)]
+pub struct OamAddr;
+#[derive(Debug)]
+pub struct OamData;
+#[derive(Debug)]
+pub struct OamDma;
+
+memory_map_ppu_reg!(OamAddr, 0x2003);
+memory_map_ppu_reg!(OamData, 0x2004);
+memory_map_ppu_reg!(OamDma, 0x4014);
+
 /// Defines the Power Processing Unit (PPU)
 #[derive(Debug)]
 pub struct Ppu {
@@ -334,6 +360,17 @@ pub struct Ppu {
     // PPU is still in the V-blank period.
     pub cycles: usize,
     pub scanline: usize,
+    pub frame_counter: usize,
+
+    // OAM read/write address. Write the address of `Oam` you want to access
+    // here. Most games just write 0x00 here and then use `OamDma`.
+    // DMA is implemented in the 2A03 chip and works by repeatedly writing
+    // to OAMDATA.
+    pub oam_addr: OamAddr,
+    // OAM data read/write
+    pub oam_data: OamData,
+    // OAM DMA high address
+    pub oam_dma: OamDma,
 }
 
 impl Ppu {
@@ -360,24 +397,199 @@ impl Ppu {
            x_reg: XReg(0),
            w_reg: WReg(0),
            cycles: 0,
-           scanline: 0,
+           // We mimick -1 here, as if this is the previous dummy scanline
+           scanline: 261,
+           frame_counter: 0,
+           oam_addr: OamAddr,
+           oam_data: OamData,
+           oam_dma: OamDma,
         }
+    }
+
+    /// PPU sprite evaluation is an operation done by the PPU once each
+    /// scanline. It prepares the set of sprites and fetches their data to be
+    /// rendered on the next scanline.
+    pub fn sprite_evaluation(&mut self, cpu_mmu: Arc<Mutex<CpuMmu>>) {
+
     }
 
     /// Execute the PPU for `max_scanline` count
     pub fn execute(
         &mut self,
         tx: mpsc::Sender<Message>,
-        sync_cycles: Arc<(Mutex<bool>, AtomicUsize, Condvar)>,
+        cpu_mmu: Arc<Mutex<CpuMmu>>,
+        sync_cycles: Arc<(Mutex<bool>, Mutex<bool>, AtomicUsize, Condvar, Condvar)>,
     ) -> Result<(), PpuError> {
-        loop {
-            let (lock, cpu_cycles, cond_var) = &*sync_cycles;
-            let mut is_synced = lock.lock().unwrap();
+        // We let the cpu start
+        let (lock, dma_lock, cpu_cycles, condvar, dma_cond) = &*sync_cycles;
+        // The PPU renders 262 scanlines per frame.
+        const SCANLINES_IN_A_FRAME: usize = 262;
+        // Each scanline lasts for 341 PPU clock cycles. Each clock cycles
+        // producing one pixel.
+        const PPU_CYCLE_PER_SCANLINE: usize = 341;
 
-            // While we still have to catch up, we are catching up
-            while cpu_cycles.load(Ordering::SeqCst) > self.cycles {
+        println!("here_ppu");
+        // Let render 10k frames
+        let frames_to_render = 1000000;
+        for frame_count in 0..frames_to_render {
+            println!("here_ppu {:?} {:#?} cpu {:?}", frame_count, self.cycles,
+                cpu_cycles.load(Ordering::SeqCst));
+            while (self.scanline + 1) % SCANLINES_IN_A_FRAME != 0 {
+                //println!("here_ppu 3 {:#?}", self.cycles);
+                // Figure out in which scanline we are
+                match self.scanline {
+                    // These are the visible scanlines, which contain the
+                    // graphics to be displayed on the screen. During these
+                    // scanlines, the PPU is busy fetching data, so the
+                    // program should not access PPU memory during this time,
+                    // unless rendering is turned off.
+                    0..=239 => {
+                        // 1. Check the PPUMASK to see if rendering is enabled
+                        // or not.
+                        {
+                            let mut cpu_mmu = cpu_mmu.lock().unwrap();
+
+                            let render_background = self.ppu_mask
+                                .render_background(&mut *cpu_mmu)
+                                .ok_or(PpuError::CannotGetPpuMask)?;
+                                //std::process::exit(1);
+                            let render_sprites = self.ppu_mask
+                                .render_sprites(&mut *cpu_mmu)
+                                .ok_or(PpuError::CannotGetPpuMask)?;
+                        }
+                        // 2. Read about cycles.
+                        while (self.cycles + 1) % PPU_CYCLE_PER_SCANLINE != 0 {
+                            match self.cycles % PPU_CYCLE_PER_SCANLINE {
+                                // This is an idle cycle.
+                                0 => {}
+                                1..=256 => {
+                                    // The data for each tile is fetched during
+                                    // this phase. Each memory access takes
+                                    // 2 PPU cycles to complete and 4 accesse
+                                    // must be completed per tile
+                                    // 1. Nametable byte
+                                    // 2. Attribute table byte
+                                    // 3. Pattern table tile low
+                                    // 4. Pattern table tile high (+8 bytes
+                                    // from pattern table tile low)
+
+                                    // OAM sprite evaluation begins at tick
+                                    // 65 of the visible scanline.
+                                    // The value of `OamAddr` at this tick
+                                    // determines the starting address for
+                                    // sprite evaluation for this scanline,
+                                    // whic can cause the sprite at `OamAddr`
+                                    // to be treated as it was sprite 0, both
+                                    // for `sprite-0 hit` and priority.
+                                }
+                                257..=320 => {
+                                    // OamAddr is set to 0 during this ticks.
+                                    // This also means that at the end of a
+                                    // normal complete rendered frame,
+                                    // `OamAddr` will always have returned at 0.
+                                    {
+                                        let mut cpu_mmu =
+                                            cpu_mmu.lock().unwrap();
+                                        self.oam_addr
+                                            .set(&mut *cpu_mmu, 0)?;
+                                    }
+                                }
+                                321..=336 => {
+                                }
+                                337..=340 => {
+                                }
+                                _ => unreachable!(),
+                            }
+                            self.sync_cycles_with_cpu(sync_cycles.clone());
+                            // While we still have to catch up, we are catching up
+                            // Normal PPU operations here
+                            self.cycles += 1
+                        }
+                    }
+                    // The PPU just idles during this scanline. Even though
+                    // accessing PPU memory from the program would be safe here,
+                    // the VBlank flag isn't set until !after! this scanline
+                    240 => {
+                        while (self.cycles + 1) % PPU_CYCLE_PER_SCANLINE != 0 {
+                            self.sync_cycles_with_cpu(sync_cycles.clone());
+                            // While we still have to catch up, we are catching up
+                            // Normal PPU operations here
+                            self.cycles += 1
+                        }
+                    }
+                    // The VBlank flag of the PPU is set at tick 1 (the second
+                    // tick) of scanline 241, where the VBlank NMI also occurs.
+                    // The PPU makes no memory accesses during these scanlines,
+                    // so PPU memory can be freely accessed by the program.
+                    241..=260 => {
+                        while (self.cycles + 1) % PPU_CYCLE_PER_SCANLINE != 0 {
+                            self.sync_cycles_with_cpu(sync_cycles.clone());
+                            // While we still have to catch up, we are catching up
+                            // Normal PPU operations here
+                            self.cycles += 1
+                        }
+                    }
+                    // This is a dummy scanline, whose sole purpose is to
+                    // fill the shift registers with the data for the first 2
+                    // tiles of the next scanline.
+                    // Although no pixels are rendered for this scanline, the
+                    // PPU still makes the same memory accesses it would for a
+                    // regular scanline, using whatever the current value of
+                    // the PPU's V register is, and for the sprite fetches,
+                    // whatever data is currently in secondary OAM (e.g., the
+                    // results from scanline 239's sprite evaluation from the
+                    // previous frame).
+                    261 => {
+                        while (self.cycles + 1) % PPU_CYCLE_PER_SCANLINE != 0 {
+                            self.sync_cycles_with_cpu(sync_cycles.clone());
+                            // While we still have to catch up, we are catching up
+                            // Normal PPU operations here
+                            self.cycles += 1
+                        }
+                    }
+                    _ => unreachable!(),
+                };
+                self.sync_cycles_with_cpu(sync_cycles.clone());
+                // Go to the next cycle count set
                 self.cycles += 1;
+                // Go to the next scanline
+                self.scanline += 1;
             }
+            assert!(self.scanline == (SCANLINES_IN_A_FRAME - 1));
+            self.scanline = 0;
+        }
+        Ok(())
+    }
+
+    fn sync_cycles_with_cpu(
+        &mut self,
+        sync_cycles: Arc<(Mutex<bool>, Mutex<bool>, AtomicUsize, Condvar, Condvar)>
+    ) {
+        let (lock, dma_lock, cpu_cycles, cond_var, dma_cond) = &*sync_cycles;
+
+        {
+            // Since `DMA` lock is the first lock that can always occur, we treat
+            // it him first
+            let mut copy_dma = dma_lock.lock().unwrap();
+
+            if *copy_dma == true {
+                // 1.Copy DMA from CPU over to OAM
+                println!("We are copying DMA...");
+                *copy_dma = false;
+            }
+
+        }
+        // 2.Notify the threads we have copied the DMA over. This notify has
+        // to take place after we have drop the lock, such that the other
+        // threads can acquire it.
+        dma_cond.notify_all();
+
+        // Tread the cycle synchronization
+        while cpu_cycles.load(Ordering::SeqCst) * 3 <= self.cycles {
+            // After acquiring this lock, we know it is time to execute and the
+            // CPU waits for us
+            let mut is_synced = lock.lock().unwrap();
+            // We mark the fact that we synced
             *is_synced = true;
             // At this point, we have caught up with the CPU and we can wake
             // the CPU to continue its execution
@@ -388,7 +600,7 @@ impl Ppu {
             );
 
             // After we have notified all, we wait until we are notified that
-            // we are out of sync
+            // we are out of sync again
             while *is_synced {
                 is_synced = cond_var.wait(is_synced).unwrap();
             }
@@ -471,7 +683,16 @@ impl Ppu {
 }
 
 #[derive(Debug)]
-pub enum PpuError {}
+pub enum PpuError {
+    CpuMmuError(CpuMmuError),
+    CannotGetPpuMask,
+}
+
+impl From<CpuMmuError> for PpuError {
+    fn from(e: CpuMmuError) -> Self {
+        Self::CpuMmuError(e)
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct VReg(u8);
